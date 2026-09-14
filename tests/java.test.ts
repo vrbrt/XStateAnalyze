@@ -125,7 +125,7 @@ describe('workspace: multi-project seams', () => {
   const parties = (list: { project?: string; node: string }[]) => list.map((p) => `${p.project}:${a.nodes.find((n) => n.id === p.node)?.name}`).sort();
 
   it('analyzes ts and java projects with prefixed ids and shared endpoint nodes', () => {
-    assert.deepEqual(a.projects.map((p) => `${p.name}:${p.language}`), ['web:ts', 'users-service:java', 'orders-service:java']);
+    assert.deepEqual(a.projects.map((p) => `${p.name}:${p.language}`), ['web:ts', 'users-service:java', 'orders-service:java', 'bpmn-engine:java']);
     assert.ok(a.nodes.some((n) => n.id.startsWith('web::')) && a.nodes.some((n) => n.id.startsWith('users-service::')));
     assert.ok(a.machines.every((m) => m.id.startsWith('web::')));
   });
@@ -153,6 +153,31 @@ describe('workspace: multi-project seams', () => {
   it('reports unused endpoints and unhandled calls', () => {
     assert.equal(seam(/POST \/api\/orders/)?.status, 'no-caller');
     assert.equal(seam(/mailer\.example\.com/)?.status, 'no-handler');
+  });
+  it('links BFF-style calls to an engine whose application name differs from the host used in URLs', () => {
+    // RestTemplate + unknown host (bpmn-engine vs spring.application.name workflow-engine) + gateway prefix /engine
+    const start = seam(/POST .*bpmn-engine:8090\/engine\/runtime\/process-instances$/)!;
+    assert.ok(start, 'seam for the RestTemplate call exists');
+    assert.equal(start.status, 'linked');
+    assert.deepEqual(parties(start.handlers), ['bpmn-engine:RuntimeController.startProcessInstance']);
+    // WebClient.Builder receiver
+    const status = seam(/GET .*process-instances\/\{id\}$/)!;
+    assert.deepEqual(parties(status.callers), ['users-service:WorkflowClient.status']);
+    assert.deepEqual(parties(status.handlers), ['bpmn-engine:RuntimeController.getProcessInstance']);
+    // absent generated client, *WithHttpInfo variant, spec whose `openapi:` key is not first
+    const complete = seam(/^POST \/runtime\/tasks\/\{id\}\/complete$/)!;
+    assert.equal(complete.operationId, 'completeTask');
+    assert.deepEqual(parties(complete.callers), ['users-service:WorkflowClient.completeTask']);
+    assert.deepEqual(parties(complete.handlers), ['bpmn-engine:RuntimeController.completeTask']);
+    const e = a.projectEdges.find((x) => x.from === 'users-service' && x.to === 'bpmn-engine' && x.kind === 'http');
+    assert.equal(e?.count, 3);
+  });
+  it('explains unlinked calls', async () => {
+    const { explainSeams } = await import('../src/workspace.js');
+    const text = explainSeams(a);
+    assert.match(text, /# Unlinked HTTP calls/);
+    assert.match(text, /mailer\.example\.com -> not mapped to any project/);
+    assert.match(text, /different HTTP method/);
   });
   it('aggregates project edges', () => {
     const e = (from: string, to: string, kind: string) => a.projectEdges.find((x) => x.from === from && x.to === to && x.kind === kind);

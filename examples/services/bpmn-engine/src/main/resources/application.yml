@@ -1,0 +1,6 @@
+# the deployment host name (bpmn-engine) differs from the application name on purpose
+spring:
+  application:
+    name: workflow-engine
+server:
+  port: 8090

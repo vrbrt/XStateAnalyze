@@ -34,6 +34,9 @@ export class OpenApiIndex {
     if (!n) return [];
     const direct = this.byName.get(n);
     if (direct?.length) return direct;
+    // generated-client variants: fooWithHttpInfo, fooAsync, fooCall, fooWithResponseSpec, fooUsingPOST, fooRequestCreation
+    const stripped = name.replace(/(WithHttpInfo|WithResponseSpec|RequestCreation|Async|Call|Using(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\d*|_\d+)$/, '');
+    if (stripped !== name) return this.lookup(stripped);
     return [];
   }
 
@@ -100,11 +103,11 @@ function looksLikeSpec(file: string): boolean {
     const st = fs.statSync(file);
     if (st.size > 20 * 1024 * 1024) return false;
     const fd = fs.openSync(file, 'r');
-    const buf = Buffer.alloc(400);
-    const n = fs.readSync(fd, buf, 0, 400, 0);
+    const buf = Buffer.alloc(8192);
+    const n = fs.readSync(fd, buf, 0, 8192, 0);
     fs.closeSync(fd);
     const head = buf.toString('utf8', 0, n);
-    return /("openapi"\s*:|^openapi\s*:|"swagger"\s*:|^swagger\s*:)/m.test(head);
+    return /("openapi"\s*:|^\s*openapi\s*:|"swagger"\s*:|^\s*swagger\s*:)/m.test(head);
   } catch {
     return false;
   }

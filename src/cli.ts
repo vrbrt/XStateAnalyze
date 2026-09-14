@@ -2,7 +2,7 @@
 import * as path from 'node:path';
 import { Command } from 'commander';
 import { VERSION, readRulesFile, writeFile } from './analyze.js';
-import { analyzeRoot, analyzeWorkspace, loadWorkspaceConfig, projectsFromArgs } from './workspace.js';
+import { analyzeRoot, analyzeWorkspace, explainSeams, loadWorkspaceConfig, projectsFromArgs } from './workspace.js';
 import * as fs from 'node:fs';
 import type { Analysis, AnalyzerOptions } from './model.js';
 import { callGraphDot } from './output/dot.js';
@@ -29,6 +29,8 @@ function commonOptions(cmd: Command): Command {
     .option('-l, --language <lang>', 'force ts or java for a single root (default: auto-detect)')
     .option('--hosts <hosts...>', 'host names / base URLs that identify this project as a call target')
     .option('--include-tests', 'Java: include src/test/java', false)
+    .option('--profile <names...>', 'Java: merge application-<profile>.yml/.properties on top of the defaults')
+    .option('--property <key=value...>', 'Java: extra / overriding Spring properties (values that only exist in the environment)')
     .option('-q, --quiet', 'no progress output', false);
 }
 
@@ -58,6 +60,8 @@ function toOptions(root: string, o: any): AnalyzerOptions {
     language: o.language,
     hosts: o.hosts,
     includeTests: o.includeTests,
+    profiles: o.profile,
+    properties: o.property ? Object.fromEntries((o.property as string[]).map((kv) => { const i = kv.indexOf('='); return [kv.slice(0, i), kv.slice(i + 1)]; })) : undefined,
     onProgress: o.quiet ? undefined : (m) => console.error(`[xsa] ${m}`),
   };
   if (o.rules) {
@@ -90,6 +94,7 @@ commonOptions(
     w('machines.json', JSON.stringify(a.machines, null, 2));
     w('external-calls.json', JSON.stringify(a.externalCalls, null, 2));
     w('seams.json', JSON.stringify({ projects: a.projects, seams: a.seams, projectEdges: a.projectEdges }, null, 2));
+    w('explain.txt', explainSeams(a));
   }
   if (formats.has('mermaid')) {
     w('callgraph.mmd', callGraphFlowchart(a, { maxNodes: Number(o.maxMermaidNodes) }));
@@ -174,9 +179,14 @@ commonOptions(
     .description('List API seams: endpoints / topics with their callers and handlers across projects')
     .option('--json', 'output JSON', false)
     .option('--unlinked', 'only seams missing a caller or a handler', false)
+    .option('--explain', 'explain why HTTP calls are unlinked: resolved targets, host mapping, nearest routes, unresolved client calls', false)
     .option('-k, --kind <kinds...>', 'filter by kind (http kafka rabbit jms sqs grpc server-action)'),
 ).action((root = '.', o) => {
   const a = run(root, o);
+  if (o.explain) {
+    console.log(explainSeams(a));
+    return;
+  }
   let seams = a.seams;
   if (o.kind) seams = seams.filter((s) => o.kind.includes(s.kind));
   if (o.unlinked) seams = seams.filter((s) => s.status !== 'linked');

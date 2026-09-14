@@ -12,6 +12,8 @@ orders:
   topic: orders.created
 users:
   topic: users.updated
+workflow:
+  engine-url: http://bpmn-engine:8090
 ---
 spring:
   config:

@@ -58,7 +58,7 @@ function isPropsFile(name: string): { profile?: string } | undefined {
 }
 
 /** Load application*.yml/properties under every src/main/resources of a project. Profile files are recorded, not merged. */
-export function loadSpringProps(projectRoot: string, exclude: RegExp[] = []): SpringProps {
+export function loadSpringProps(projectRoot: string, exclude: RegExp[] = [], profiles: string[] = [], overrides: Record<string, string> = {}): SpringProps {
   const props = new SpringProps();
   const files: { file: string; profile?: string }[] = [];
   const walk = (dir: string, depth: number) => {
@@ -84,10 +84,12 @@ export function loadSpringProps(projectRoot: string, exclude: RegExp[] = []): Sp
   walk(projectRoot, 0);
   // bootstrap first, then application; profile-less only
   files.sort((a, b) => (a.file.includes('bootstrap') ? -1 : 0) - (b.file.includes('bootstrap') ? -1 : 0));
+  // default documents first, then the requested profiles in order (later wins)
+  files.sort((a, b) => (a.profile ? profiles.indexOf(a.profile) + 1 : 0) - (b.profile ? profiles.indexOf(b.profile) + 1 : 0));
   for (const f of files) {
     if (f.profile) {
       props.profileFiles.push(normalize(path.relative(projectRoot, f.file)));
-      continue;
+      if (!profiles.includes(f.profile)) continue;
     }
     props.files.push(normalize(path.relative(projectRoot, f.file)));
     const text = fs.readFileSync(f.file, 'utf8');
@@ -105,7 +107,7 @@ export function loadSpringProps(projectRoot: string, exclude: RegExp[] = []): Sp
           const obj = doc.toJS();
           if (!obj || typeof obj !== 'object') continue;
           const activate = (obj as any)?.spring?.config?.activate?.['on-profile'] ?? (obj as any)?.spring?.profiles;
-          if (activate) continue; // profile-specific document
+          if (activate && !String(activate).split(/[,\s]+/).some((x) => profiles.includes(x))) continue; // profile-specific document
           props.set('', obj);
         }
       } catch {
@@ -113,6 +115,7 @@ export function loadSpringProps(projectRoot: string, exclude: RegExp[] = []): Sp
       }
     }
   }
+  for (const [k, v] of Object.entries(overrides)) props.set(k, v);
   return props;
 }
 

@@ -1,0 +1,23 @@
+# OpenAPI document that does not start with the openapi key
+info:
+  title: Workflow Engine API
+  version: 3.1.0
+openapi: 3.0.3
+servers:
+  - url: http://localhost:8090
+paths:
+  /runtime/process-instances:
+    post:
+      operationId: startProcessInstance
+      tags: [Runtime]
+      responses: { '201': { description: started } }
+  /runtime/process-instances/{id}:
+    get:
+      operationId: getProcessInstance
+      tags: [Runtime]
+      responses: { '200': { description: ok } }
+  /runtime/tasks/{id}/complete:
+    post:
+      operationId: completeTask
+      tags: [Tasks]
+      responses: { '204': { description: done } }

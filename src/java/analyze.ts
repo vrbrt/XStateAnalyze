@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { EdgeSet } from '../analyzers/calls.js';
 import { attachExternalNode } from '../analyzers/external.js';
 import { NodeRegistry } from '../analyzers/functions.js';
-import type { Analysis, AnalyzerOptions, EntryKind, ExternalCall, ExternalCategory, FileInfo, GraphNode, ProjectInfo } from '../model.js';
+import type { Analysis, AnalyzerOptions, EntryKind, ExternalCall, ExternalCategory, FileInfo, GraphNode, ProjectInfo, UnresolvedClientCall } from '../model.js';
 import { OpenApiIndex, loadOpenApi } from '../openapi.js';
 import { normalize } from '../project.js';
 import { JavaIndex, type Injection } from './index.js';
@@ -73,6 +73,7 @@ class JavaAnalyzer {
   readonly externalCalls: ExternalCall[] = [];
   readonly warnings: string[] = [];
   readonly files: FileInfo[] = [];
+  readonly unresolvedClientCalls: UnresolvedClientCall[] = [];
   unresolved = 0;
   private counter = { n: 0 };
   private nodeByMethod = new Map<JMethod, GraphNode>();
@@ -545,7 +546,10 @@ class JavaAnalyzer {
             start = i + 1;
           } else {
             // unknown receiver (e.g. field from Lombok builder, untyped lambda param): count once
-            if (c.segments.some((s) => s.call)) this.unresolved++;
+            if (c.segments.some((s) => s.call)) {
+              this.unresolved++;
+              this.noteUnresolvedClient(c, scope, owner, undefined, 'receiver not declared in scope');
+            }
             return;
           }
         }
@@ -567,6 +571,7 @@ class JavaAnalyzer {
       }
       if (!curRef) {
         this.unresolved++;
+        this.noteUnresolvedClient(c, scope, owner, undefined, 'receiver type could not be inferred');
         return;
       }
       // unwrap wrappers before dispatch: Optional<X>.get()/orElse, Mono<X>.block(), List<X>.get(i) -> X
@@ -582,6 +587,7 @@ class JavaAnalyzer {
         else if (/^(getBody|block|join|get|orElse|orElseThrow|orElseGet|toList|stream|findFirst)$/.test(seg.name) && recvRef.args.length) curRef = recvRef.args[0];
         else {
           this.libraryCall(recvRef.name, seg.name, scope, owner, c.line, false);
+          if (i === start) this.noteUnresolvedClient(c, scope, owner, recvRef.name, `library type ${recvRef.name} (not in project, no external rule matched)`);
           curRef = recvRef.name === 'String' ? recvRef : undefined;
           if (!curRef) return;
         }
@@ -624,6 +630,17 @@ class JavaAnalyzer {
       viaInjection = undefined;
       if (!curRef) return;
     }
+  }
+
+  /** Remember call sites on receivers that look like HTTP/RPC clients but were not understood (for `xsa seams --explain`). */
+  private noteUnresolvedClient(c: Chain, scope: Scope, owner: GraphNode, typeName: string | undefined, reason: string) {
+    const first = c.segments.findIndex((s) => s.call);
+    if (first < 0 || this.unresolvedClientCalls.length >= 500) return;
+    const receiver = c.base.kind === 'name' ? c.segments.slice(0, Math.max(first, 1)).map((s) => s.name).join('.') : c.base.kind;
+    const method = c.segments[first].name;
+    const looksClient = /client|api|template|rest|http|gateway|proxy|service|feign|stub|engine|bpmn|process|workflow|connector/i.test(receiver + ' ' + (typeName ?? ''));
+    if (!looksClient) return;
+    this.unresolvedClientCalls.push({ project: this.project, node: owner.id, file: owner.file, line: c.line, receiver, receiverType: typeName, method, reason });
   }
 
   /** Lombok @Getter/@Setter/@Data/@Builder generated accessors: return the field type for getters. */
@@ -741,7 +758,10 @@ class JavaAnalyzer {
       recvRef = this.chainResultRef(c, scope, firstCallIdx);
     }
     if (recvRef) recvType = this.index.resolveType(recvRef.name, scope.type);
-    const typeName = recvRef?.name ?? '';
+    let typeName = recvRef?.name ?? '';
+    // WebClient.Builder / RestClient.Builder / RestTemplateBuilder receivers behave like the client they build
+    if (recvRef && /^(WebClient|RestClient)\.Builder$/.test(recvRef.raw.replace(/\s/g, ''))) typeName = recvRef.raw.split('.')[0];
+    if (typeName === 'RestTemplateBuilder') typeName = 'RestTemplate';
     const call = segs[firstCallIdx];
     const callee = segs.slice(0, firstCallIdx + 1).map((s) => s.name).join('.');
     const argStr = (i: number) => this.evalString(call.call!.args[i], scope);
@@ -760,6 +780,7 @@ class JavaAnalyzer {
     }
     // ---- WebClient / RestClient fluent chains ----
     if (/^(WebClient|RestClient)$/.test(typeName) || (c.base.kind === 'name' && /^(WebClient|RestClient)$/.test(segs[0].name))) {
+      const builderBase = segs.find((s) => s.call && /^(baseUrl|rootUri)$/.test(s.name));
       const verb = segs.find((s) => s.call && /^(get|post|put|delete|patch|head|options|method)$/.test(s.name));
       const uri = segs.find((s) => s.call && s.name === 'uri');
       if (!verb) return false;
@@ -774,7 +795,8 @@ class JavaAnalyzer {
         } else target = this.evalString(a0, scope);
       }
       let base: string | undefined;
-      if (c.base.kind === 'name' && /^(WebClient|RestClient)$/.test(segs[0].name)) {
+      if (builderBase?.call?.args[0]) base = this.evalString(builderBase.call.args[0], scope);
+      else if (c.base.kind === 'name' && /^(WebClient|RestClient)$/.test(segs[0].name)) {
         const create = segs.find((s) => s.call && /^(create|baseUrl)$/.test(s.name));
         base = create?.call?.args[0] ? this.evalString(create.call.args[0], scope) : undefined;
       } else base = this.beanBaseUrl(typeName, recvName, fieldQualifier);
@@ -986,7 +1008,7 @@ export function analyzeJava(opts: AnalyzerOptions, shared?: { openapi?: OpenApiI
   const excludeRe = (opts.exclude ?? []).map(globToRegExp);
   const warnings: string[] = [];
   const project = opts.project ?? path.basename(root);
-  const props = loadSpringProps(root, excludeRe);
+  const props = loadSpringProps(root, excludeRe, opts.profiles ?? [], opts.properties ?? {});
   const openapi = shared?.openapi ?? loadOpenApi(root, opts.openapi, excludeRe, warnings);
   const files = listJavaFiles(root, !!opts.includeTests, excludeRe);
   log(`java: ${files.length} source files, ${props.size} properties from ${props.files.join(', ') || 'no application.yml'}`);
@@ -1060,6 +1082,7 @@ export function analyzeJava(opts: AnalyzerOptions, shared?: { openapi?: OpenApiI
     externalCalls: an.externalCalls,
     machines: [],
     openapi: { specs: openapi.specs, operations: openapi.operations },
+    diagnostics: { unresolvedClientCalls: an.unresolvedClientCalls },
     stats: {
       files: parsed.length,
       functions: nodes.filter((n) => n.kind === 'method' || n.kind === 'function').length,

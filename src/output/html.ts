@@ -516,7 +516,7 @@ async function selectMachine(id) {
   const implList = (k) => impl[k].length ? '<li><b>' + k + ':</b> ' + impl[k].map((x) => { const nid = m.implementationNodes[k + '.' + x]; return nid && nodeById.has(nid) ? nodeLink(nid) : esc(x); }).join(', ') + '</li>' : '';
   $('#machineMain').innerHTML =
     '<h2 style="margin:0 0 4px">' + esc(m.name) + (m.machineId ? ' <span class="muted">#' + esc(m.machineId) + '</span>' : '') + '</h2>' +
-    '<div class="muted" style="margin-bottom:12px"><a href="' + fileHref(m.file, m.line, (nodeById.get(m.id) || {}).project) + '">' + esc(m.file) + ':' + m.line + '</a> · XState v' + m.version + ' · <code>' + esc(m.api) + '</code> · ' + nodeLink(m.id) + ' in graph · <button id="copyMmd">Copy Mermaid</button></div>' +
+    '<div class="muted" style="margin-bottom:12px"><a href="' + fileHref(m.file, m.line, (nodeById.get(m.id) || {}).project) + '">' + esc(m.file) + ':' + m.line + '</a> · XState v' + m.version + ' · <code>' + esc(m.api) + '</code> · ' + nodeLink(m.id) + ' in graph · <button id="copyMmd">Copy Mermaid</button> <button id="openMachineWin" title="Open the diagram in its own window (zoom / pan / print)">Open in new window</button> <button id="downloadSvg">Download SVG</button></div>' +
     '<div class="diagram" id="diagram"><div class="muted">Rendering…</div></div>' +
     '<div class="machineMeta">' +
       '<div class="card"><h3>Implementations</h3><ul>' + ['actions', 'guards', 'actors', 'delays'].map(implList).join('') + '</ul></div>' +
@@ -524,6 +524,13 @@ async function selectMachine(id) {
       '<div class="card"><h3>State tree</h3><div class="tree"><ul>' + stateTree(m.root) + '</ul></div></div>' +
     '</div>';
   $('#copyMmd').addEventListener('click', () => navigator.clipboard.writeText(m.mermaid));
+  $('#openMachineWin').addEventListener('click', () => openDiagramWindow(m));
+  $('#downloadSvg').addEventListener('click', () => {
+    const svg = $('#diagram svg');
+    if (!svg) return;
+    const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n' + svg.outerHTML], { type: 'image/svg+xml' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = m.name + '.svg'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
   try {
     await lib('mermaid');
     if (!mermaidReady) { mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' }); mermaidReady = true; }
@@ -608,6 +615,45 @@ async function ensureProjectsGraph() {
 /* ---------- scripting hook (also used by scripts/render-check.mjs) ---------- */
 window.xsa = { data: A, showTab, focusNode, selectMachine, getCy: () => cy, getProjectsCy: () => cyProjects, lib };
 performance.mark('xsa:ready');
+
+/** Standalone window with the rendered diagram, zoom/pan controls and the Mermaid source (works offline: the SVG is already rendered). */
+function openDiagramWindow(m) {
+  const svg = $('#diagram svg');
+  if (!svg) return;
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const bg = dark ? '#0b1220' : '#fff', fg = dark ? '#e5e7eb' : '#0f172a', panel = dark ? '#111a2e' : '#f8fafc', border = dark ? '#243149' : '#e2e8f0';
+  const html = '<!doctype html><html><head><meta charset="utf-8"><title>' + esc(m.name) + ' · state machine</title><style>' +
+    'html,body{margin:0;height:100%;font:13px system-ui,sans-serif;background:' + bg + ';color:' + fg + '}' +
+    '.bar{position:fixed;top:0;left:0;right:0;display:flex;gap:8px;align-items:center;padding:8px 12px;background:' + panel + ';border-bottom:1px solid ' + border + ';z-index:2}' +
+    '.bar b{margin-right:auto}.bar button{font:inherit;padding:4px 10px;border:1px solid ' + border + ';border-radius:5px;background:transparent;color:inherit;cursor:pointer}' +
+    '.stage{position:absolute;top:44px;left:0;right:0;bottom:0;overflow:auto;cursor:grab}.stage.drag{cursor:grabbing}' +
+    '.stage svg{display:block;transform-origin:0 0;max-width:none!important;height:auto!important;margin:24px}' +
+    'details{position:fixed;bottom:0;left:0;right:0;max-height:40%;overflow:auto;background:' + panel + ';border-top:1px solid ' + border + ';z-index:2}summary{padding:6px 12px;cursor:pointer}pre{margin:0;padding:8px 12px;font-size:11px}' +
+    '@media print{.bar,details{display:none}.stage{position:static;overflow:visible}}' +
+    '</style></head><body>' +
+    '<div class="bar"><b>' + esc(m.name) + '</b><span>' + esc(m.file) + ':' + m.line + ' · XState v' + m.version + '</span>' +
+    '<button data-z="-">−</button><button data-z="0">100%</button><button data-z="+">+</button><button data-z="fit">Fit</button><button data-print="1">Print</button></div>' +
+    '<div class="stage" id="stage">' + svg.outerHTML + '</div>' +
+    '<details><summary>Mermaid source</summary><pre>' + esc(m.mermaid) + '</pre></details>';
+  const w = window.open('', '_blank');
+  if (!w) { alert('The browser blocked the popup; allow popups for this page.'); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+  // behaviour is attached from here (no inline script in the popup): zoom buttons, ctrl+wheel zoom, drag to pan
+  const d = w.document, el = d.querySelector('#stage svg'), stage = d.getElementById('stage');
+  const natural = { w: el.viewBox && el.viewBox.baseVal.width || el.getBoundingClientRect().width, h: el.viewBox && el.viewBox.baseVal.height || el.getBoundingClientRect().height };
+  el.removeAttribute('width'); el.removeAttribute('height'); el.style.width = natural.w + 'px';
+  let z = 1;
+  const apply = () => { el.style.transform = 'scale(' + z + ')'; };
+  const fit = () => { z = Math.max(0.05, Math.min((stage.clientWidth - 48) / natural.w, (stage.clientHeight - 48) / natural.h, 4)); apply(); };
+  d.querySelectorAll('[data-z]').forEach((b) => b.addEventListener('click', () => { const v = b.dataset.z; if (v === '+') z *= 1.25; else if (v === '-') z /= 1.25; else if (v === '0') z = 1; else { fit(); return; } apply(); }));
+  d.querySelector('[data-print]').addEventListener('click', () => w.print());
+  stage.addEventListener('wheel', (e) => { if (!e.ctrlKey) return; e.preventDefault(); z *= e.deltaY < 0 ? 1.1 : 1 / 1.1; apply(); }, { passive: false });
+  let drag = null;
+  stage.addEventListener('mousedown', (e) => { drag = { x: e.clientX, y: e.clientY, l: stage.scrollLeft, t: stage.scrollTop }; stage.classList.add('drag'); });
+  w.addEventListener('mousemove', (e) => { if (!drag) return; stage.scrollLeft = drag.l - (e.clientX - drag.x); stage.scrollTop = drag.t - (e.clientY - drag.y); });
+  w.addEventListener('mouseup', () => { drag = null; stage.classList.remove('drag'); });
+  fit();
+}
 
 /* ---------- external calls ---------- */
 const extState = { q: '', cats: new Set(), sort: 'category', dir: 1 };

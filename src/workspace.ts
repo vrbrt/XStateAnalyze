@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { VERSION, analyze } from './analyze.js';
 import { analyzeJava, isJavaProject } from './java/analyze.js';
-import type { Analysis, AnalyzerOptions, GraphEdge, GraphNode, OpenApiOperation, ProjectEdge, ProjectInfo, Seam, SeamKind, SeamParty } from './model.js';
+import type { Analysis, AnalyzerOptions, GraphEdge, GraphNode, OpenApiOperation, ProjectEdge, ProjectInfo, Seam, SeamKind, SeamParty, UnresolvedClientCall } from './model.js';
 import { OpenApiIndex, findSpecFiles, loadOpenApi } from './openapi.js';
 import { normalize } from './project.js';
 
@@ -21,6 +21,10 @@ export interface ProjectConfig {
   includeTests?: boolean;
   openapiHandlers?: string[];
   ignorePackages?: string[];
+  /** Spring profiles to merge (application-<profile>.*) */
+  profiles?: string[];
+  /** Extra / overriding Spring properties, e.g. values that only exist in the deployment environment */
+  properties?: Record<string, string>;
 }
 
 export interface WorkspaceConfig {
@@ -86,6 +90,10 @@ export function prefixAnalysis(a: Analysis, project: string): Analysis {
     c.caller = map(c.caller);
     c.project = project;
   }
+    for (const d of a.diagnostics?.unresolvedClientCalls ?? []) {
+      d.node = map(d.node);
+      d.project = project;
+    }
   for (const m of a.machines) {
     m.id = map(m.id);
     m.usedBy = m.usedBy.map(map);
@@ -142,6 +150,10 @@ function mergeAnalyses(parts: Analysis[], root: string, openapi: OpenApiIndex): 
     out.externalCalls.push(...a.externalCalls);
     out.machines.push(...a.machines);
     out.warnings.push(...a.warnings);
+    if (a.diagnostics?.unresolvedClientCalls.length) {
+      out.diagnostics ??= { unresolvedClientCalls: [] };
+      out.diagnostics.unresolvedClientCalls.push(...a.diagnostics.unresolvedClientCalls);
+    }
     for (const k of Object.keys(out.stats) as (keyof Analysis['stats'])[]) out.stats[k] += a.stats[k];
   }
   out.nodes = [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id));
@@ -251,29 +263,41 @@ export function linkSeams(a: Analysis) {
       }
       // the caller's own project also owns the path when the URL is relative (same-origin fetch)
       const callerProjects = new Set(a.edges.filter((e) => e.kind === 'external' && e.to === ext.id).map((e) => nodeById.get(e.from)?.project).filter(Boolean) as string[]);
+      let how = 'operation';
       if (!targets.length && p.startsWith('/')) {
         const probe = p.replace(/\{[^}]*\}/g, '__param__');
-        const candidates = handlers.filter((h) => {
-          if (!h.methods.includes(method)) return false;
-          const re = new RegExp(h.re.source.replace(/\[\^\/\]\+/g, '(?:[^/]+|__param__)'));
-          return re.test(probe);
-        });
+        const matching = (loose: boolean) =>
+          handlers.filter((h) => {
+            if (!h.methods.includes(method)) return false;
+            const src = h.re.source.replace(/\[\^\/\]\+/g, '(?:[^/]+|__param__)');
+            // loose: the caller URL may carry an extra prefix (ingress path, servlet path, unknown context path)
+            const re = new RegExp(loose ? src.replace(/^\^/, '^(?:/[^/]+){1,3}') : src);
+            return re.test(probe);
+          });
+        let candidates = matching(false);
+        if (!candidates.length) {
+          candidates = matching(true).filter((h) => (h.node.route ?? '').split('/').filter(Boolean).length >= 2);
+          if (candidates.length) how = 'route-suffix';
+          else how = 'route';
+        } else how = 'route';
         let scoped = candidates;
         if (hostProject) scoped = candidates.filter((h) => h.node.project === hostProject);
         else if (!host && callerProjects.size) {
           // relative URL: prefer the caller's project, fall back to any
           const same = candidates.filter((h) => callerProjects.has(h.node.project ?? ''));
           scoped = same.length ? same : candidates;
-        } else if (host && !hostProject) scoped = []; // unknown external host: not one of our projects
+        } else if (host && !hostProject) {
+          // unknown host (k8s DNS name, gateway, ...): the path decides; other projects' handlers are still legitimate targets
+          scoped = candidates.filter((h) => !callerProjects.has(h.node.project ?? '')).length ? candidates.filter((h) => !callerProjects.has(h.node.project ?? '')) : candidates;
+          how += ' (host ' + host + ' not mapped to a project)';
+        }
         targets = [...new Set(scoped.map((h) => h.node))];
-        // a known host with no project match: try server-prefixed routes of that project only (already covered); else nothing
-        if (hostProject && !targets.length) targets = [];
       } else if (targets.length && hostProject) {
         const scoped = targets.filter((t) => t.project === hostProject);
         if (scoped.length) targets = scoped;
       }
       const ambiguous = targets.length > 1 && new Set(targets.map((t) => t.project)).size > 1 && !hostProject;
-      for (const t of targets) addEdge(ext.id, t.id, 'http-route', ambiguous ? 'ambiguous' : `${method} ${p || x.target}`);
+      for (const t of targets) addEdge(ext.id, t.id, 'http-route', ambiguous ? 'ambiguous' : `${method} ${p || x.target} [${how}]`);
     } else if (x.category === 'messaging') {
       const topic = x.target;
       if (!topic || topic.startsWith('{')) continue;
@@ -446,6 +470,8 @@ export function analyzeWorkspace(cfg: WorkspaceConfig, base: WorkspaceOptions = 
       includeTests: p.includeTests ?? base.includeTests,
       openapiHandlers: p.openapiHandlers ?? base.openapiHandlers,
       ignorePackages: p.ignorePackages ?? base.ignorePackages,
+      profiles: p.profiles ?? base.profiles,
+      properties: { ...(base.properties ?? {}), ...(p.properties ?? {}) },
       openapi: [],
       onProgress: (m) => log(`[${p.name}] ${m}`),
     };
@@ -472,6 +498,87 @@ export function analyzeWorkspace(cfg: WorkspaceConfig, base: WorkspaceOptions = 
   }
   merged.stats.durationMs = Date.now() - t0;
   return merged;
+}
+
+/* ---------- diagnostics ---------- */
+
+/** Human-readable explanation of why calls are unlinked, with the nearest handler routes and hints. */
+export function explainSeams(a: Analysis): string {
+  const nodeById = new Map(a.nodes.map((n) => [n.id, n]));
+  const name = (id: string) => nodeById.get(id)?.name ?? id;
+  const tag = (p?: string) => (a.projects.length > 1 && p ? `${p}:` : '');
+  const out: string[] = [];
+  const hostToProject = new Map<string, string>();
+  for (const p of a.projects) {
+    for (const h of p.hosts) {
+      const clean = h.replace(/^[a-z]+:\/\//i, '').replace(/\/$/, '').toLowerCase();
+      hostToProject.set(clean, p.name);
+      hostToProject.set(clean.split('/')[0], p.name);
+    }
+  }
+  const handlers = a.nodes.filter((n) => n.entry && HTTP_ENTRIES.has(n.entry) && n.route);
+  const isParam = (x: string) => /^[\[{:].*/.test(x) || x === '*';
+  /** handlers whose trailing route segments match the path's trailing segments (literals must agree; at least one literal in common) */
+  const similar = (method: string, p: string) => {
+    const segs = p.split('/').filter(Boolean);
+    return handlers
+      .map((h) => {
+        const hs = (h.route ?? '').split('/').filter(Boolean);
+        let score = 0;
+        let literal = 0;
+        for (let i = 1; i <= Math.min(segs.length, hs.length); i++) {
+          const x = segs[segs.length - i], y = hs[hs.length - i];
+          if (isParam(x) && isParam(y)) score++;
+          else if (isParam(y) && !isParam(x)) score++; // handler param accepts a concrete caller segment
+          else if (x === y) { score++; literal++; }
+          else break;
+        }
+        return { h, score: literal ? score : 0, methodOk: (h.httpMethods ?? ALL_METHODS).includes(method) };
+      })
+      .filter((x) => x.score > 0)
+      .sort((x, y) => y.score - x.score || Number(y.methodOk) - Number(x.methodOk))
+      .slice(0, 3);
+  };
+
+  out.push(`# Projects`);
+  for (const p of a.projects) out.push(`- ${p.name} (${p.language})${p.serviceName ? ` service=${p.serviceName}` : ''}${p.contextPath ? ` context-path=${p.contextPath}` : ''}${p.port ? ` port=${p.port}` : ''} hosts=[${p.hosts.join(', ')}] ${p.propertyFiles?.length ? `properties=${p.propertyFiles.join(',')}` : '(no application.yml/properties found)'}`);
+  const specs = a.openapi.specs;
+  out.push('', `# OpenAPI documents indexed: ${specs.length}`);
+  for (const s of specs) out.push(`- ${(s as { project?: string }).project ? (s as { project?: string }).project + ':' : ''}${s.file} (${s.operations} operations${s.title ? `, ${s.title}` : ''})`);
+
+  const unlinked = a.seams.filter((s) => s.status === 'no-handler' && s.kind === 'http');
+  out.push('', `# Unlinked HTTP calls: ${unlinked.length}`);
+  for (const s of unlinked) {
+    const { host, path: p } = s.target ? splitUrl(s.target) : { host: undefined, path: '' };
+    const hp = host ? hostToProject.get(host) ?? hostToProject.get(host.split(':')[0]) : undefined;
+    out.push('', `## ${s.label}`);
+    out.push(`  callers: ${s.callers.map((c) => tag(c.project) + name(c.node) + (c.line ? ':' + c.line : '')).join(', ')}`);
+    out.push(`  target:  ${s.target ?? '(dynamic - could not evaluate the URL expression)'}`);
+    const unresolvedProps = [...(s.target ?? '').matchAll(/\{([A-Za-z0-9_.-]*[.:][A-Za-z0-9_.-]*|[A-Z][A-Z0-9_]+)\}/g)].map((m) => m[1]);
+    if (unresolvedProps.length) out.push(`  note:    unresolved configuration in the URL: ${unresolvedProps.join(', ')} (define it in application.yml, --profile <name>, or "properties" in xsa.workspace.json)`);
+    if (host) out.push(`  host:    ${host} -> ${hp ? `project ${hp}` : 'not mapped to any project (add it to that project\'s "hosts" in xsa.workspace.json)'}`);
+    if (s.operationId) out.push(`  operationId ${s.operationId}: no handler with this operationId (controller method names differ from the spec?) and no route match`);
+    const near = p ? similar((s.method ?? 'GET').toUpperCase(), p) : [];
+    if (near.length) {
+      out.push(`  nearest handler routes:`);
+      for (const { h, score, methodOk } of near) out.push(`    ${(h.httpMethods ?? ['ANY']).join('/')} ${h.route}  -> ${tag(h.project)}${h.name}  (${score} trailing segment${score === 1 ? '' : 's'} match${methodOk ? '' : ', different HTTP method'})`);
+      const best = near[0].h;
+      if (!hp && host) out.push(`  hint:    if ${best.route} is the intended endpoint, add "${host}" to hosts of project ${best.project} (route prefixes may differ by context-path / gateway path)`);
+      else if (p !== best.route) out.push(`  hint:    path differs from ${best.route}: check server.servlet.context-path / gateway prefix in the caller URL`);
+    } else if (p) out.push(`  no handler route shares a trailing segment with ${p}; is the target service part of the workspace and are its controllers @RestController/@RequestMapping (or a committed spec with matching operationIds)?`);
+  }
+
+  const diag = a.diagnostics?.unresolvedClientCalls ?? [];
+  if (diag.length) {
+    out.push('', `# Calls on client-like receivers the analyzer did not understand: ${diag.length}`);
+    const byType = new Map<string, UnresolvedClientCall[]>();
+    for (const d of diag) (byType.get(d.receiverType ?? d.receiver) ?? byType.set(d.receiverType ?? d.receiver, []).get(d.receiverType ?? d.receiver)!).push(d);
+    for (const [k, list] of [...byType.entries()].sort((x, y) => y[1].length - x[1].length).slice(0, 25)) {
+      out.push(`- ${k}: ${list.length} call(s), e.g. ${tag(list[0].project)}${name(list[0].node)}:${list[0].line} ${list[0].receiver}.${list[0].method}() — ${list[0].reason}`);
+    }
+    out.push(`  hint: generated clients are recognised when a spec with matching operationIds is indexed; hand-written wrappers around RestTemplate/WebClient are followed only when the URL is built inside the called method.`);
+  }
+  return out.join('\n');
 }
 
 /** Single-root convenience: detect language, run, link, compute seams. */

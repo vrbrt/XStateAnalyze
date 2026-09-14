@@ -81,6 +81,8 @@ Common options: `--ignore-packages react react-dom` (drop noisy edges), `--inclu
 
 **Seams (multi-project)**
 - Every endpoint/topic is one shared node; callers in any project attach to it. Handlers are found by operationId (spec-owning project and `servers` hosts preferred), by host → project (`hosts` in the workspace file, `spring.application.name`, `localhost:<server.port>`) plus route template with context path, or by topic/queue name (RabbitMQ binding keys with `*`/`#`).
+- HTTP handler lookup order: operationId → host mapped to a project → route match (exact, then tolerant of an extra gateway / servlet prefix on the caller side). An *unknown* host (Kubernetes DNS name, ingress…) no longer blocks linking — the path decides, and the link is labelled with how it was found. `xsa seams --explain` (also written to `explain.txt`) prints, for every unlinked call, the evaluated URL, the host → project decision, the nearest handler routes and a hint (missing `hosts`, context-path prefix, method mismatch, unresolved `${…}` property), plus calls on client-looking receivers the analyzer could not type.
+- Java configuration inputs: `--profile dev` merges `application-dev.*`; `--property engine.url=http://bpmn-engine:8080` (or `"properties"` per project in the workspace file) supplies values that only exist in the deployment environment.
 - `analysis.seams` lists each seam with `callers`, `handlers` and a status — `linked`, `no-handler` (third-party or missing implementation), `no-caller` (unused endpoint/listener), `ambiguous` (several projects match without a host hint); `analysis.projectEdges` aggregates them per project pair. The HTML report shows them as a **Projects** system diagram (click an edge for its seams) and a filterable **Seams** table; the Markdown report includes a Mermaid project-dependency graph.
 
 **External calls** (rule-driven, see `src/rules.ts`)
@@ -106,7 +108,7 @@ Add your own with `--rules`: a JSON array (merged before the defaults) or `{ "re
 - **Large graphs** (thousands of nodes): the page renders at most *Max nodes* (default 1500, adjustable) nearest to the focus, picks the layout automatically (dagre up to 400 nodes, breadth-first above — dagre is never run on thousands of nodes), switches to compact node rendering, and hides package/builtin members by default above 1500 nodes. Cytoscape and Mermaid are loaded only when the Graph / Machines tabs are opened, so Overview, Seams and External calls appear immediately.
 - `--offline` inlines cytoscape, dagre and mermaid into `report.html` (they are optional dependencies; if missing, `npm i cytoscape cytoscape-dagre dagre mermaid`) so the report needs no network at all (+~3 MB).
 - The embedded data is `analysis.json` minus `files`, with edges stored as index tuples; `window.xsa.data` has the normal shape again after load. `window.xsa` exposes `{ data, showTab, focusNode, selectMachine, getCy, getProjectsCy, lib }` for scripting the page.
-- **Machines**: rendered state diagram, implementations (linked to their graph nodes), used-by / invokes, events, and a collapsible state tree. "Copy Mermaid" for pasting into docs.
+- **Machines**: rendered state diagram, implementations (linked to their graph nodes), used-by / invokes, events, and a collapsible state tree. "Copy Mermaid" for pasting into docs, "Open in new window" (zoom, pan, print, Mermaid source) and "Download SVG".
 - **External calls**: sortable, filterable table by category chips and free text, with links to the calling function.
 
 ## Programmatic use

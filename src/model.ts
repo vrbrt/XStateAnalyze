@@ -315,10 +315,25 @@ export interface ProjectEdge {
   count: number;
 }
 
+/** Call sites the analyzer could not resolve but that look like HTTP/RPC clients — surfaced by `xsa seams --explain`. */
+export interface UnresolvedClientCall {
+  project?: string;
+  node: string;
+  file: string;
+  line: number;
+  /** receiver as written, e.g. `engineClient` */
+  receiver: string;
+  /** declared type of the receiver when known */
+  receiverType?: string;
+  method: string;
+  reason: string;
+}
+
 export interface Analysis {
   version: string;
   generatedAt: string;
   root: string;
+  diagnostics?: { unresolvedClientCalls: UnresolvedClientCall[] };
   /** Projects in the analysis (one for a single root) */
   projects: ProjectInfo[];
   /** API seams between projects (multi-project) or between callers and handlers (single project) */
@@ -345,6 +360,10 @@ export interface AnalyzerOptions {
   hosts?: string[];
   /** Include src/test/java (Java) */
   includeTests?: boolean;
+  /** Spring profile(s) whose application-<profile>.* files are merged on top of the defaults (Java) */
+  profiles?: string[];
+  /** Extra / overriding configuration properties (Java), e.g. { "engine.url": "http://bpmn-engine:8080" } for values that only exist in the environment */
+  properties?: Record<string, string>;
   tsconfig?: string;
   include?: string[];
   exclude?: string[];

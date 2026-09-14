@@ -1,8 +1,29 @@
 {
   "$schema": "../xsa.workspace.schema.json",
   "projects": [
-    { "name": "web", "root": "./demo", "type": "ts", "hosts": [] },
-    { "name": "users-service", "root": "./services/users-service", "type": "java", "hosts": ["api.example.com/v1"] },
-    { "name": "orders-service", "root": "./services/orders-service", "type": "java" }
+    {
+      "name": "web",
+      "root": "./demo",
+      "type": "ts",
+      "hosts": []
+    },
+    {
+      "name": "users-service",
+      "root": "./services/users-service",
+      "type": "java",
+      "hosts": [
+        "api.example.com/v1"
+      ]
+    },
+    {
+      "name": "orders-service",
+      "root": "./services/orders-service",
+      "type": "java"
+    },
+    {
+      "name": "bpmn-engine",
+      "root": "./services/bpmn-engine",
+      "type": "java"
+    }
   ]
 }
