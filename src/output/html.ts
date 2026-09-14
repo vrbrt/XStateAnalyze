@@ -30,6 +30,8 @@ ${CSS}
   <div class="brand">xsa <span class="muted">static analysis</span></div>
   <nav>
     <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="projects" id="projectsTab" hidden>Projects</button>
+    <button data-tab="seams">Seams <span class="pill" id="seamCount"></span></button>
     <button data-tab="graph">Call graph</button>
     <button data-tab="machines">Machines <span class="pill" id="machineCount"></span></button>
     <button data-tab="external">External calls <span class="pill" id="externalCount"></span></button>
@@ -40,6 +42,7 @@ ${CSS}
 <main>
   <section id="tab-overview" class="tab active">
     <div class="tiles" id="tiles"></div>
+    <div class="card" id="projectsCard"><h3>Projects</h3><div id="projectsTable"></div></div>
     <div class="cols">
       <div class="card"><h3>Entry points</h3><div id="entryPoints"></div></div>
       <div class="card"><h3>Workspace packages</h3><div id="packages"></div></div>
@@ -47,6 +50,22 @@ ${CSS}
     <div class="card"><h3>External calls by category</h3><div id="externalSummary"></div></div>
     <div class="card" id="openapiCard" hidden><h3>OpenAPI operations</h3><div id="openapi"></div></div>
     <div class="card" id="warningsCard" hidden><h3>Warnings</h3><ul id="warnings"></ul></div>
+  </section>
+
+  <section id="tab-projects" class="tab">
+    <div class="canvasWrap"><div id="cyProjects"></div><div id="projectsLegend" class="legendBox"></div></div>
+    <aside class="details" id="projectDetails"><div class="muted">Click a project or an edge between projects.</div></aside>
+  </section>
+
+  <section id="tab-seams" class="tab">
+    <div class="toolbar">
+      <input id="seamSearch" type="search" placeholder="Filter seams by path, topic, operation, caller, handler…">
+      <div id="seamKindChips" class="chips"></div>
+      <div id="seamStatusChips" class="chips"></div>
+    </div>
+    <div class="tableWrap"><table id="seamTable"><thead><tr>
+      <th data-k="status">Status</th><th data-k="kind">Kind</th><th data-k="label">Seam</th><th data-k="operationId">Operation</th><th>Callers</th><th>Handlers</th>
+    </tr></thead><tbody></tbody></table></div>
   </section>
 
   <section id="tab-graph" class="tab">
@@ -68,6 +87,7 @@ ${CSS}
       </details>
       <details open><summary>Node kinds</summary><div id="kindFilters" class="checks"></div></details>
       <details open><summary>Edge kinds</summary><div id="edgeFilters" class="checks"></div></details>
+      <details open id="projectFilterBox" hidden><summary>Projects</summary><div id="projectFilters" class="checks"></div></details>
       <details><summary>Packages</summary><div id="pkgFilters" class="checks"></div></details>
     </aside>
     <div class="canvasWrap">
@@ -141,9 +161,11 @@ button { font:inherit; padding:4px 8px; border:1px solid var(--border); border-r
 .machineMain { flex:1; overflow:auto; padding:16px } .pad { padding:16px } .diagram { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px; overflow:auto; margin-bottom:16px } .diagram svg { max-width:100%; height:auto }
 .machineMeta { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px }
 pre { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px; overflow:auto; font-size:11px; max-height:300px }
-#tab-external { flex-direction:column } .toolbar { display:flex; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--border); background:var(--panel) } .toolbar input { width:320px }
+#tab-external, #tab-seams { flex-direction:column } .toolbar { flex-wrap:wrap } .toolbar { display:flex; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--border); background:var(--panel) } .toolbar input { width:320px }
 .chips { display:flex; gap:6px; flex-wrap:wrap } .chip { padding:2px 9px; border-radius:12px; border:1px solid var(--border); cursor:pointer; font-size:12px } .chip.on { background:var(--accent-bg); border-color:var(--accent) }
-.tableWrap { flex:1; overflow:auto; padding:0 16px 16px } .tree { font-family:ui-monospace,monospace; font-size:11.5px } .tree ul { list-style:none; padding-left:16px; margin:2px 0 } .tree .t { color:var(--muted) }
+.tableWrap { flex:1; overflow:auto; padding:0 16px 16px } #cyProjects { position:absolute; inset:0 } .legendBox { position:absolute; left:10px; bottom:10px; background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:11px }
+.status { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:600 } .status.linked { background:#dcfce7; color:#166534 } .status.no-handler { background:#fee2e2; color:#991b1b } .status.no-caller { background:#fef3c7; color:#92400e } .status.ambiguous { background:#ede9fe; color:#5b21b6 }
+.proj { display:inline-block; padding:0 5px; border-radius:3px; font-size:10.5px; background:var(--border); margin-right:3px; color:var(--muted) } .tree { font-family:ui-monospace,monospace; font-size:11.5px } .tree ul { list-style:none; padding-left:16px; margin:2px 0 } .tree .t { color:var(--muted) }
 kbd { font-size:10px; border:1px solid var(--border); border-radius:3px; padding:0 3px }
 `;
 
@@ -160,10 +182,16 @@ const extByCaller = new Map();
 for (const c of A.externalCalls) (extByCaller.get(c.caller) ?? extByCaller.set(c.caller, []).get(c.caller)).push(c);
 const KIND_COLORS = { component: '#2563eb', hook: '#7c3aed', function: '#64748b', method: '#475569', module: '#ca8a04', machine: '#16a34a', external: '#ea580c', package: '#dc2626', builtin: '#a8a29e' };
 const CATEGORY_COLORS = { http: '#ea580c', grpc: '#c026d3', graphql: '#e535ab', trpc: '#0891b2', websocket: '#0d9488', db: '#b45309', 'server-action': '#dc2626', messaging: '#7c3aed', other: '#78716c' };
-const EDGE_STYLE = { calls: ['#94a3b8', 'solid'], renders: ['#2563eb', 'dashed'], 'uses-machine': ['#16a34a', 'solid'], invokes: ['#16a34a', 'solid'], implements: ['#16a34a', 'dotted'], defines: ['#16a34a', 'dashed'], external: ['#ea580c', 'solid'], 'server-action': ['#dc2626', 'dashed'], 'http-route': ['#dc2626', 'dashed'] };
+const EDGE_STYLE = { calls: ['#94a3b8', 'solid'], renders: ['#2563eb', 'dashed'], 'uses-machine': ['#16a34a', 'solid'], invokes: ['#16a34a', 'solid'], implements: ['#16a34a', 'dotted'], defines: ['#16a34a', 'dashed'], external: ['#ea580c', 'solid'], 'server-action': ['#dc2626', 'dashed'], 'http-route': ['#dc2626', 'dashed'], 'message-route': ['#0d9488', 'dashed'] };
+const CATEGORY_COLORS_EXTRA = { messaging: '#0d9488' };
 const nodeColor = (n) => n.kind === 'external' ? (CATEGORY_COLORS[n.external?.category] ?? KIND_COLORS.external) : KIND_COLORS[n.kind];
-const fileHref = (file, line) => 'vscode://file/' + A.root + '/' + file + (line ? ':' + line : '');
-const nodeLink = (id) => { const n = nodeById.get(id); return n ? '<a data-node="' + esc(id) + '">' + esc(n.name) + '</a>' : esc(id); };
+const multi = A.projects.length > 1;
+const projectRoot = (name) => (A.projects.find((p) => p.name === name) ?? {}).root ?? A.root;
+const fileHref = (file, line, project) => 'vscode://file/' + projectRoot(project) + '/' + file + (line ? ':' + line : '');
+const projTag = (p) => (multi && p ? '<span class="proj">' + esc(p) + '</span>' : '');
+const nodeLink = (id) => { const n = nodeById.get(id); return n ? projTag(n.project) + '<a data-node="' + esc(id) + '">' + esc(n.name) + '</a>' : esc(id); };
+const PROJECT_COLORS = ['#2563eb', '#16a34a', '#ea580c', '#7c3aed', '#0891b2', '#db2777', '#ca8a04', '#4f46e5'];
+const projectColor = (name) => PROJECT_COLORS[Math.max(0, A.projects.findIndex((p) => p.name === name)) % PROJECT_COLORS.length];
 
 /* ---------- tabs ---------- */
 $$('nav button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
@@ -171,6 +199,7 @@ function showTab(name) {
   $$('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + name));
   if (name === 'graph') ensureGraph();
+  if (name === 'projects') ensureProjectsGraph();
   if (name === 'machines' && A.machines.length && !currentMachine) selectMachine(A.machines[0].id);
 }
 document.body.addEventListener('click', (ev) => {
@@ -184,10 +213,20 @@ document.body.addEventListener('click', (ev) => {
 $('#rootLabel').textContent = A.root + ' · ' + new Date(A.generatedAt).toLocaleString();
 $('#machineCount').textContent = A.machines.length;
 $('#externalCount').textContent = A.externalCalls.length;
+$('#seamCount').textContent = A.seams.length;
+if (multi) { $('#projectsTab').hidden = false; $('#projectFilterBox').hidden = false; }
+{
+  const fnCount = (p) => A.nodes.filter((n) => n.project === p && n.internal && n.kind !== 'module' && n.kind !== 'machine').length;
+  const entryCount = (p) => A.nodes.filter((n) => n.project === p && n.entry).length;
+  const extCount = (p) => A.externalCalls.filter((c) => c.project === p).length;
+  const seamStats = (p) => { const out = A.seams.filter((s) => s.callers.some((c) => c.project === p)).length; const inn = A.seams.filter((s) => s.handlers.some((h) => h.project === p)).length; return out + ' out / ' + inn + ' in'; };
+  $('#projectsTable').innerHTML = '<table><tr><th>Project</th><th>Language</th><th>Service</th><th>Hosts</th><th>Files</th><th>Functions</th><th>Entry points</th><th>External calls</th><th>Seams</th></tr>' +
+    A.projects.map((p) => '<tr><td><span class="proj" style="background:' + projectColor(p.name) + '22;color:' + projectColor(p.name) + '">' + esc(p.name) + '</span></td><td>' + esc(p.language) + '</td><td class="mono">' + esc(p.serviceName ?? '') + (p.contextPath ? ' <span class="muted">' + esc(p.contextPath) + '</span>' : '') + (p.port ? ' <span class="muted">:' + esc(p.port) + '</span>' : '') + '</td><td class="mono small">' + esc((p.hosts ?? []).join(', ')) + '</td><td>' + p.files + '</td><td>' + fnCount(p.name) + '</td><td>' + entryCount(p.name) + '</td><td>' + extCount(p.name) + '</td><td>' + seamStats(p.name) + '</td></tr>').join('') + '</table>';
+}
 $('#tiles').innerHTML = Object.entries(A.stats).filter(([k]) => k !== 'durationMs').map(([k, v]) => '<div class="tile"><b>' + v + '</b><span class="muted">' + k.replace(/([A-Z])/g, ' $1').toLowerCase() + '</span></div>').join('');
 {
   const entries = A.nodes.filter((n) => n.entry).sort((x, y) => (x.route ?? '').localeCompare(y.route ?? '') || x.name.localeCompare(y.name));
-  $('#entryPoints').innerHTML = entries.length ? '<table><tr><th>Kind</th><th>Route</th><th>Function</th><th>File</th></tr>' + entries.map((n) => '<tr><td><span class="badge entry">' + esc(n.entry) + '</span></td><td class="mono">' + esc(n.route ?? '') + (n.httpMethods && n.httpMethods.length < 7 ? ' <span class="muted">' + n.httpMethods.join('/') + '</span>' : '') + '</td><td>' + nodeLink(n.id) + '</td><td class="mono"><a href="' + fileHref(n.file, n.line) + '">' + esc(n.file) + ':' + n.line + '</a></td></tr>').join('') + '</table>' : '<div class="muted">No Next.js entry points detected.</div>';
+  $('#entryPoints').innerHTML = entries.length ? '<table><tr><th>Kind</th><th>Route / topic</th><th>Function</th><th>File</th></tr>' + entries.map((n) => '<tr><td><span class="badge entry">' + esc(n.entry) + '</span></td><td class="mono">' + esc(n.route ?? (n.topics ?? []).join(', ')) + (n.httpMethods && n.httpMethods.length < 7 ? ' <span class="muted">' + n.httpMethods.join('/') + '</span>' : '') + '</td><td>' + nodeLink(n.id) + '</td><td class="mono"><a href="' + fileHref(n.file, n.line, n.project) + '">' + esc(n.file) + ':' + n.line + '</a></td></tr>').join('') + '</table>' : '<div class="muted">No entry points detected.</div>';
   $('#packages').innerHTML = '<table><tr><th>Package</th><th>Dir</th><th>Files</th><th>Functions</th></tr>' + A.packages.map((p) => '<tr><td>' + esc(p.name) + '</td><td class="mono">' + esc(p.dir) + '</td><td>' + p.files + '</td><td>' + A.nodes.filter((n) => n.internal && n.package === p.name && n.kind !== 'module').length + '</td></tr>').join('') + '</table>';
   const cats = {};
   for (const c of A.externalCalls) { const k = c.category + ' / ' + c.protocol; cats[k] = (cats[k] ?? 0) + 1; }
@@ -204,7 +243,7 @@ $('#tiles').innerHTML = Object.entries(A.stats).filter(([k]) => k !== 'durationM
 
 /* ---------- call graph ---------- */
 let cy = null, currentFocus = null, visibleIds = null;
-const state = { kinds: new Set(Object.keys(KIND_COLORS).filter((k) => k !== 'builtin')), edges: new Set(Object.keys(EDGE_STYLE)), pkgs: null, collapse: false };
+const state = { kinds: new Set(Object.keys(KIND_COLORS).filter((k) => k !== 'builtin')), edges: new Set(Object.keys(EDGE_STYLE)), pkgs: null, projects: null, collapse: false };
 function initFilters() {
   const kinds = {};
   for (const n of A.nodes) kinds[n.kind] = (kinds[n.kind] ?? 0) + 1;
@@ -217,6 +256,10 @@ function initFilters() {
   const ws = new Set(A.packages.map((p) => p.name));
   $('#pkgFilters').innerHTML = Object.entries(pk).sort((a, b) => (ws.has(b[0]) - ws.has(a[0])) || b[1] - a[1]).map(([k, v]) => '<label><input type="checkbox" data-pkg="' + esc(k) + '" checked> ' + esc(k) + (ws.has(k) ? ' <span class="badge">workspace</span>' : '') + ' <span class="muted">(' + v + ')</span></label>').join('');
   const usedCats = [...new Set(A.nodes.filter((n) => n.kind === 'external').map((n) => n.external.category))];
+  if (multi) {
+    $('#projectFilters').innerHTML = A.projects.map((p) => '<label><input type="checkbox" data-project="' + esc(p.name) + '" checked> <span style="color:' + projectColor(p.name) + '">■</span> ' + esc(p.name) + ' <span class="muted">(' + A.nodes.filter((n) => n.project === p.name).length + ')</span></label>').join('');
+    $('#projectFilters').addEventListener('change', () => { state.projects = new Set($$('#projectFilters input:checked').map((i) => i.dataset.project)); render(); });
+  }
   $('#legend').innerHTML = Object.entries(KIND_COLORS).filter(([k]) => k !== 'external').map(([k, c]) => '<span style="--c:' + c + '">' + k + '</span>').join('') + usedCats.map((c) => '<span style="--c:' + (CATEGORY_COLORS[c] ?? KIND_COLORS.external) + '">' + c + '</span>').join('');
   $('#kindFilters').addEventListener('change', (e) => { const k = e.target.dataset.kind; if (e.target.checked) state.kinds.add(k); else state.kinds.delete(k); render(); });
   $('#edgeFilters').addEventListener('change', (e) => { const k = e.target.dataset.edge; if (e.target.checked) state.edges.add(k); else state.edges.delete(k); render(); });
@@ -295,7 +338,7 @@ function render(relayout) {
   if (!cy) return;
   const big = A.nodes.length > 400 && !visibleIds && !currentFocus;
   if (big && !render.forced) { cy.elements().remove(); return; }
-  let nodes = A.nodes.filter((n) => state.kinds.has(n.kind) && (!state.pkgs || !n.package || state.pkgs.has(n.package)) && (!visibleIds || visibleIds.has(n.id)));
+  let nodes = A.nodes.filter((n) => state.kinds.has(n.kind) && (!state.pkgs || !n.package || state.pkgs.has(n.package)) && (!state.projects || !n.project || state.projects.has(n.project)) && (!visibleIds || visibleIds.has(n.id)));
   const ids = new Set(nodes.map((n) => n.id));
   let edges = A.edges.filter((e) => state.edges.has(e.kind) && ids.has(e.from) && ids.has(e.to));
   const els = [];
@@ -304,7 +347,7 @@ function render(relayout) {
   for (const n of nodes) {
     const g = groupOf(n);
     if (g) { groups.set(g, (groups.get(g) ?? 0) + 1); continue; }
-    els.push({ data: { id: n.id, nid: n.id, label: n.name + (n.entry ? '\n«' + n.entry.replace('next:', '') + (n.route ? ' ' + n.route : '') + '»' : '') + (n.kind === 'external' && n.external.calls > 1 ? '\n(' + n.external.calls + ' call sites)' : ''), kind: n.kind, color: nodeColor(n), entry: !!n.entry } });
+    els.push({ data: { id: n.id, nid: n.id, label: (multi && n.project && n.internal ? '[' + n.project + '] ' : '') + n.name + (n.entry ? '\n«' + n.entry.replace('next:', '') + (n.route ? ' ' + n.route : n.topics ? ' ' + n.topics.join(',') : '') + '»' : '') + (n.kind === 'external' && n.external.calls > 1 ? '\n(' + n.external.calls + ' call sites)' : ''), kind: n.kind, color: nodeColor(n), entry: !!n.entry } });
   }
   for (const [g, count] of groups) els.push({ data: { id: g, nid: g, label: g.slice(4) + '\n(' + count + ' members)', kind: 'pkg-group', color: KIND_COLORS.package } });
   const seenE = new Set();
@@ -344,7 +387,7 @@ function showDetails(id) {
       '<div class="muted">external · <span class="badge">' + esc(x.category) + '</span> ' + esc(x.protocol) + (n.package ? ' · ' + esc(n.package) : '') + '</div>' +
       '<h4>Target</h4><div class="mono" style="word-break:break-all">' + esc(x.method ? x.method + ' ' : '') + esc(x.target ?? '(dynamic)') + (x.service ? ' <span class="muted">' + esc(x.service) + '</span>' : '') + '</div>' +
       '<div class="row" style="margin-top:8px"><button data-act="focus">Focus</button> <button data-act="callers">Trace callers ⇡</button></div>' +
-      '<h4>Call sites (' + sites.length + ')</h4><ul>' + sites.map((c) => '<li>' + nodeLink(c.caller) + ' <span class="muted small"><code>' + esc(c.callee) + '</code> <a href="' + fileHref(c.file, c.line) + '">' + esc(c.file.split('/').pop()) + ':' + c.line + '</a></span></li>').join('') + '</ul>' +
+      '<h4>Call sites (' + sites.length + ')</h4><ul>' + sites.map((c) => '<li>' + nodeLink(c.caller) + ' <span class="muted small"><code>' + esc(c.callee) + '</code> <a href="' + fileHref(c.file, c.line, c.project) + '">' + esc(c.file.split('/').pop()) + ':' + c.line + '</a></span></li>').join('') + '</ul>' +
       '<h4>Outgoing (' + (outE.get(id) ?? []).length + ')</h4>' + edgeList(outE.get(id) ?? [], 'out');
     $$('button[data-act]', $('#details')).forEach((b) => b.addEventListener('click', () => {
       if (b.dataset.act === 'focus') focusNode(id);
@@ -354,10 +397,10 @@ function showDetails(id) {
   }
   $('#details').innerHTML =
     '<h2 style="color:' + nodeColor(n) + '">' + esc(n.name) + '</h2>' +
-    '<div class="muted">' + esc(n.kind) + ' · ' + (n.internal ? '<a href="' + fileHref(n.file, n.line) + '">' + esc(n.file) + (n.line ? ':' + n.line : '') + '</a>' : esc(n.file)) + (n.package ? ' · ' + esc(n.package) : '') + '</div>' +
-    '<div style="margin:6px 0">' + badges + '</div>' +
+    '<div class="muted">' + projTag(n.project) + esc(n.kind) + ' · ' + (n.internal ? '<a href="' + fileHref(n.file, n.line, n.project) + '">' + esc(n.file) + (n.line ? ':' + n.line : '') + '</a>' : esc(n.file)) + (n.package && !multi ? ' · ' + esc(n.package) : '') + (n.className ? ' · <span class="mono">' + esc(n.className) + '</span>' : '') + '</div>' +
+    '<div style="margin:6px 0">' + badges + (n.topics ? n.topics.map((t) => '<span class="badge">topic ' + esc(t) + '</span>').join('') : '') + '</div>' +
     '<div class="row"><button data-act="focus">Focus</button> <button data-act="callers">Trace callers ⇡</button> <button data-act="callees">Trace callees ⇣</button>' + (machine ? ' <a data-machine="' + esc(id) + '"><button>Open diagram</button></a>' : '') + '</div>' +
-    (ext.length ? '<h4>External calls (' + ext.length + ')</h4><ul>' + ext.map((c) => '<li><span class="badge" style="background:' + (CATEGORY_COLORS[c.category] ?? '#999') + '22">' + esc(c.category) + '</span> ' + (c.node && nodeById.has(c.node) ? nodeLink(c.node) : esc(c.method ?? '') + ' <code>' + esc(c.target ?? c.callee) + '</code>') + ' <span class="muted small"><code>' + esc(c.callee) + '</code> <a href="' + fileHref(c.file, c.line) + '">:' + c.line + '</a></span></li>').join('') + '</ul>' : '') +
+    (ext.length ? '<h4>External calls (' + ext.length + ')</h4><ul>' + ext.map((c) => '<li><span class="badge" style="background:' + (CATEGORY_COLORS[c.category] ?? '#999') + '22">' + esc(c.category) + '</span> ' + (c.node && nodeById.has(c.node) ? nodeLink(c.node) : esc(c.method ?? '') + ' <code>' + esc(c.target ?? c.callee) + '</code>') + ' <span class="muted small"><code>' + esc(c.callee) + '</code> <a href="' + fileHref(c.file, c.line, c.project) + '">:' + c.line + '</a></span></li>').join('') + '</ul>' : '') +
     '<h4>Outgoing (' + (outE.get(id) ?? []).length + ')</h4>' + edgeList(outE.get(id) ?? [], 'out') +
     '<h4>Incoming (' + (inE.get(id) ?? []).length + ')</h4>' + edgeList(inE.get(id) ?? [], 'in');
   $$('button[data-act]', $('#details')).forEach((b) => b.addEventListener('click', () => {
@@ -385,7 +428,7 @@ async function selectMachine(id) {
   const implList = (k) => impl[k].length ? '<li><b>' + k + ':</b> ' + impl[k].map((x) => { const nid = m.implementationNodes[k + '.' + x]; return nid && nodeById.has(nid) ? nodeLink(nid) : esc(x); }).join(', ') + '</li>' : '';
   $('#machineMain').innerHTML =
     '<h2 style="margin:0 0 4px">' + esc(m.name) + (m.machineId ? ' <span class="muted">#' + esc(m.machineId) + '</span>' : '') + '</h2>' +
-    '<div class="muted" style="margin-bottom:12px"><a href="' + fileHref(m.file, m.line) + '">' + esc(m.file) + ':' + m.line + '</a> · XState v' + m.version + ' · <code>' + esc(m.api) + '</code> · ' + nodeLink(m.id) + ' in graph · <button id="copyMmd">Copy Mermaid</button></div>' +
+    '<div class="muted" style="margin-bottom:12px"><a href="' + fileHref(m.file, m.line, (nodeById.get(m.id) || {}).project) + '">' + esc(m.file) + ':' + m.line + '</a> · XState v' + m.version + ' · <code>' + esc(m.api) + '</code> · ' + nodeLink(m.id) + ' in graph · <button id="copyMmd">Copy Mermaid</button></div>' +
     '<div class="diagram" id="diagram"><div class="muted">Rendering…</div></div>' +
     '<div class="machineMeta">' +
       '<div class="card"><h3>Implementations</h3><ul>' + ['actions', 'guards', 'actors', 'delays'].map(implList).join('') + '</ul></div>' +
@@ -401,8 +444,75 @@ async function selectMachine(id) {
   }
 }
 
+/* ---------- seams ---------- */
+const SEAM_KIND_COLORS = { http: '#ea580c', kafka: '#0d9488', rabbit: '#0d9488', jms: '#0d9488', sqs: '#0d9488', grpc: '#c026d3', 'server-action': '#dc2626' };
+const seamState = { q: '', kinds: new Set(A.seams.map((s) => s.kind)), statuses: new Set(['linked', 'no-handler', 'no-caller', 'ambiguous']), sort: 'status', dir: 1 };
+{
+  const kinds = [...new Set(A.seams.map((s) => s.kind))];
+  $('#seamKindChips').innerHTML = kinds.map((k) => '<span class="chip on" data-kind="' + esc(k) + '">' + esc(k) + ' (' + A.seams.filter((s) => s.kind === k).length + ')</span>').join('');
+  const statuses = ['linked', 'no-handler', 'no-caller', 'ambiguous'];
+  $('#seamStatusChips').innerHTML = statuses.map((st) => '<span class="chip on" data-status="' + st + '"><span class="status ' + st + '">' + st + '</span> ' + A.seams.filter((s) => s.status === st).length + '</span>').join('');
+  $$('#seamKindChips .chip').forEach((ch) => ch.addEventListener('click', () => { ch.classList.toggle('on'); if (ch.classList.contains('on')) seamState.kinds.add(ch.dataset.kind); else seamState.kinds.delete(ch.dataset.kind); renderSeams(); }));
+  $$('#seamStatusChips .chip').forEach((ch) => ch.addEventListener('click', () => { ch.classList.toggle('on'); if (ch.classList.contains('on')) seamState.statuses.add(ch.dataset.status); else seamState.statuses.delete(ch.dataset.status); renderSeams(); }));
+  $('#seamSearch').addEventListener('input', (e) => { seamState.q = e.target.value.toLowerCase(); renderSeams(); });
+  $$('#seamTable th[data-k]').forEach((th) => th.addEventListener('click', () => { if (seamState.sort === th.dataset.k) seamState.dir *= -1; else { seamState.sort = th.dataset.k; seamState.dir = 1; } renderSeams(); }));
+  renderSeams();
+}
+function partyList(list) {
+  if (!list.length) return '<span class="muted">—</span>';
+  return '<ul style="margin:0;padding-left:14px">' + list.map((p) => '<li>' + nodeLink(p.node) + (p.line ? ' <span class="muted small">:' + p.line + '</span>' : '') + '</li>').join('') + '</ul>';
+}
+function renderSeams() {
+  const nm = (id) => nodeById.get(id)?.name ?? id;
+  let rows = A.seams.filter((s) => seamState.kinds.has(s.kind) && seamState.statuses.has(s.status));
+  if (seamState.q) rows = rows.filter((s) => [s.label, s.target, s.operationId, s.method, ...s.callers.map((c) => c.project + ' ' + nm(c.node)), ...s.handlers.map((h) => h.project + ' ' + nm(h.node))].join(' ').toLowerCase().includes(seamState.q));
+  const order = { 'no-handler': 0, ambiguous: 1, 'no-caller': 2, linked: 3 };
+  rows.sort((a, b) => { const k = seamState.sort; const va = k === 'status' ? order[a.status] : (a[k] ?? ''); const vb = k === 'status' ? order[b.status] : (b[k] ?? ''); return (typeof va === 'number' ? va - vb : String(va).localeCompare(String(vb))) * seamState.dir || a.label.localeCompare(b.label); });
+  $('#seamTable tbody').innerHTML = rows.map((s) => '<tr><td><span class="status ' + s.status + '">' + s.status + '</span></td><td><span class="badge" style="background:' + (SEAM_KIND_COLORS[s.kind] ?? '#999') + '22">' + esc(s.kind) + '</span></td><td class="mono">' + (s.node && nodeById.has(s.node) ? '<a data-node="' + esc(s.node) + '">' + esc(s.label) + '</a>' : esc(s.label)) + '</td><td class="mono">' + esc(s.operationId ?? '') + (s.spec ? ' <span class="muted small">' + esc(s.spec) + '</span>' : '') + '</td><td>' + partyList(s.callers) + '</td><td>' + partyList(s.handlers) + '</td></tr>').join('') || '<tr><td colspan="6" class="muted">No matching seams.</td></tr>';
+}
+
+/* ---------- projects (system view) ---------- */
+let cyProjects = null;
+function ensureProjectsGraph() {
+  if (cyProjects || !multi) return;
+  const els = [];
+  const pseudo = new Set();
+  for (const p of A.projects) els.push({ data: { id: 'p:' + p.name, label: p.name + '\n' + (p.serviceName && p.serviceName !== p.name ? p.serviceName + '\n' : '') + p.language, color: projectColor(p.name), kind: 'project' } });
+  for (const e of A.projectEdges) {
+    for (const x of [e.from, e.to]) if (!A.projects.some((p) => p.name === x) && !pseudo.has(x)) { pseudo.add(x); els.push({ data: { id: 'p:' + x, label: x, color: '#a8a29e', kind: 'pseudo' } }); }
+    els.push({ data: { id: 'pe:' + e.from + '|' + e.to + '|' + e.kind, source: 'p:' + e.from, target: 'p:' + e.to, label: e.kind + ' ×' + e.count, color: SEAM_KIND_COLORS[e.kind] ?? '#94a3b8', width: 1 + Math.min(6, Math.log2(e.count + 1)), seams: e.seams, from: e.from, to: e.to } });
+  }
+  cyProjects = cytoscape({
+    container: $('#cyProjects'), elements: els, wheelSensitivity: 0.2,
+    style: [
+      { selector: 'node', style: { label: 'data(label)', 'text-wrap': 'wrap', 'text-valign': 'center', 'text-halign': 'center', 'font-size': 12, width: 'label', height: 'label', padding: '18px', shape: 'round-rectangle', 'background-color': 'data(color)', 'background-opacity': 0.15, 'border-width': 2.5, 'border-color': 'data(color)', color: getComputedStyle(document.body).color } },
+      { selector: 'node[kind="pseudo"]', style: { 'border-style': 'dashed', 'background-opacity': 0.05 } },
+      { selector: 'edge', style: { width: 'data(width)', 'curve-style': 'bezier', 'control-point-step-size': 60, 'target-arrow-shape': 'triangle', 'line-color': 'data(color)', 'target-arrow-color': 'data(color)', label: 'data(label)', 'font-size': 10, color: getComputedStyle(document.body).color, 'text-background-color': getComputedStyle(document.body).backgroundColor, 'text-background-opacity': 1, 'text-background-padding': '2px', 'text-rotation': 'autorotate' } },
+    ],
+    layout: { name: 'circle', padding: 60 },
+  });
+  cyProjects.on('tap', 'edge', (ev) => {
+    const d = ev.target.data();
+    const seams = A.seams.filter((s) => d.seams.includes(s.id));
+    $('#projectDetails').innerHTML = '<h2>' + esc(d.from) + ' → ' + esc(d.to) + '</h2><div class="muted">' + esc(d.label) + '</div><h4>Seams</h4><ul>' + seams.map((s) => '<li><span class="status ' + s.status + '">' + s.status + '</span> ' + (s.node ? '<a data-node="' + esc(s.node) + '">' + esc(s.label) + '</a>' : esc(s.label)) + '<div class="small muted">' + s.callers.filter((c) => c.project === d.from).map((c) => nodeLink(c.node)).join(', ') + ' → ' + (s.handlers.filter((h) => h.project === d.to).map((h) => nodeLink(h.node)).join(', ') || '—') + '</div></li>').join('') + '</ul>';
+  });
+  cyProjects.on('tap', 'node', (ev) => {
+    const name = ev.target.data('id').slice(2);
+    const p = A.projects.find((x) => x.name === name);
+    if (!p) { $('#projectDetails').innerHTML = '<h2>' + esc(name) + '</h2><div class="muted">Calls that no analyzed project handles (third-party APIs, unknown hosts).</div>'; return; }
+    const entries = A.nodes.filter((n) => n.project === name && n.entry);
+    const outSeams = A.seams.filter((s) => s.callers.some((c) => c.project === name));
+    $('#projectDetails').innerHTML = '<h2 style="color:' + projectColor(name) + '">' + esc(name) + '</h2><div class="muted">' + esc(p.language) + ' · ' + esc(p.root) + '</div>' +
+      (p.serviceName ? '<div>service <code>' + esc(p.serviceName) + '</code>' + (p.port ? ' port ' + esc(p.port) : '') + (p.contextPath ? ' context ' + esc(p.contextPath) : '') + '</div>' : '') +
+      (p.hosts.length ? '<div class="small muted">hosts: ' + esc(p.hosts.join(', ')) + '</div>' : '') +
+      '<h4>Entry points (' + entries.length + ')</h4><ul>' + entries.map((n) => '<li><span class="badge entry">' + esc(n.entry.replace(/^(next|spring):/, '')) + '</span> <span class="mono">' + esc(n.route ?? (n.topics ?? []).join(',')) + '</span> ' + nodeLink(n.id) + '</li>').join('') + '</ul>' +
+      '<h4>Outgoing seams (' + outSeams.length + ')</h4><ul>' + outSeams.map((s) => '<li><span class="status ' + s.status + '">' + s.status + '</span> ' + esc(s.label) + ' → ' + ([...new Set(s.handlers.map((h) => h.project))].join(', ') || '—') + '</li>').join('') + '</ul>';
+  });
+  $('#projectsLegend').innerHTML = Object.entries(SEAM_KIND_COLORS).filter(([k]) => A.projectEdges.some((e) => e.kind === k)).map(([k, c]) => '<span style="color:' + c + '">■</span> ' + k).join(' &nbsp; ');
+}
+
 /* ---------- scripting hook (also used by scripts/render-check.mjs) ---------- */
-window.xsa = { data: A, showTab, focusNode, selectMachine, getCy: () => cy };
+window.xsa = { data: A, showTab, focusNode, selectMachine, getCy: () => cy, getProjectsCy: () => cyProjects };
 
 /* ---------- external calls ---------- */
 const extState = { q: '', cats: new Set(), sort: 'category', dir: 1 };
@@ -420,6 +530,6 @@ function renderExt() {
   let rows = A.externalCalls.filter((c) => extState.cats.has(c.category));
   if (extState.q) rows = rows.filter((c) => [c.target, c.callee, c.protocol, c.method, c.file, callerName(c.caller)].join(' ').toLowerCase().includes(extState.q));
   rows.sort((a, b) => { const k = extState.sort; const va = k === 'caller' ? callerName(a.caller) : (a[k] ?? ''); const vb = k === 'caller' ? callerName(b.caller) : (b[k] ?? ''); return String(va).localeCompare(String(vb)) * extState.dir || a.file.localeCompare(b.file) || a.line - b.line; });
-  $('#extTable tbody').innerHTML = rows.map((c) => '<tr><td><span class="badge">' + esc(c.category) + '</span></td><td>' + esc(c.protocol) + '</td><td class="mono">' + esc(c.method ?? '') + '</td><td class="mono">' + (c.node && nodeById.has(c.node) ? '<a data-node="' + esc(c.node) + '">' + esc(c.target ?? '(dynamic)') + '</a>' : esc(c.target ?? '')) + '</td><td class="mono">' + esc(c.callee) + (c.service ? ' <span class="muted">' + esc(c.service) + '</span>' : '') + '</td><td>' + nodeLink(c.caller) + '</td><td class="mono"><a href="' + fileHref(c.file, c.line) + '">' + esc(c.file) + ':' + c.line + '</a></td></tr>').join('') || '<tr><td colspan="7" class="muted">No matching calls.</td></tr>';
+  $('#extTable tbody').innerHTML = rows.map((c) => '<tr><td><span class="badge">' + esc(c.category) + '</span></td><td>' + esc(c.protocol) + '</td><td class="mono">' + esc(c.method ?? '') + '</td><td class="mono">' + (c.node && nodeById.has(c.node) ? '<a data-node="' + esc(c.node) + '">' + esc(c.target ?? '(dynamic)') + '</a>' : esc(c.target ?? '')) + '</td><td class="mono">' + esc(c.callee) + (c.service ? ' <span class="muted">' + esc(c.service) + '</span>' : '') + '</td><td>' + nodeLink(c.caller) + '</td><td class="mono"><a href="' + fileHref(c.file, c.line, c.project) + '">' + esc(c.file) + ':' + c.line + '</a></td></tr>').join('') || '<tr><td colspan="7" class="muted">No matching calls.</td></tr>';
 }
 `;

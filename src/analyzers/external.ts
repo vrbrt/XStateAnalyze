@@ -248,7 +248,7 @@ export function externalLabel(c: Pick<ExternalCall, 'category' | 'protocol' | 'm
  * connect the caller to it. The package-member edge for the same call site
  * (`api.get`) is dropped so the endpoint node replaces it in the graph.
  */
-export function attachExternalNode(c: ExternalCall, site: CallSite, registry: NodeRegistry, edges: EdgeSet, openapi?: OpenApiIndex): GraphNode {
+export function attachExternalNode(c: ExternalCall, registry: NodeRegistry, edges: EdgeSet, openapi?: OpenApiIndex, subsumed?: { to: string; kind: 'calls' }): GraphNode {
   // HTTP calls that hit a spec'd operation share one node per operation, whatever client made the call
   if (c.category === 'http' && openapi?.size && !c.operationId) {
     const op = openapi.match(c.method, c.target);
@@ -276,12 +276,15 @@ export function attachExternalNode(c: ExternalCall, site: CallSite, registry: No
   }
   n.external!.calls++;
   edges.add(c.caller, id, 'external', c.line, c.protocol);
-  if (site.resolution.kind === 'package' && site.resolution.package && site.resolution.member) {
-    edges.remove(c.caller, `pkg:${site.resolution.package}#${site.resolution.member}`, 'calls');
-  } else if (site.resolution.kind === 'builtin' && site.resolution.member) {
-    edges.remove(c.caller, `builtin:${site.resolution.member}`, 'calls');
-  }
+  if (subsumed) edges.remove(c.caller, subsumed.to, subsumed.kind);
   return n;
+}
+
+/** Package/builtin edge a call site produced, to be replaced by its external node. */
+export function subsumedEdge(site: CallSite): { to: string; kind: 'calls' } | undefined {
+  if (site.resolution.kind === 'package' && site.resolution.package && site.resolution.member) return { to: `pkg:${site.resolution.package}#${site.resolution.member}`, kind: 'calls' };
+  if (site.resolution.kind === 'builtin' && site.resolution.member) return { to: `builtin:${site.resolution.member}`, kind: 'calls' };
+  return undefined;
 }
 
 const OPENAPI_FALLBACK_RULE: ExternalRule = { name: 'openapi-operation', category: 'http', protocol: 'openapi', extract: 'openapi' };
@@ -317,7 +320,7 @@ export function detectExternalCalls(sites: CallSite[], rules: ExternalRule[], co
           : site.resolution.package ?? site.receiver?.typePackage,
         rule: rule.name,
       };
-      if (graph) call.node = attachExternalNode(call, site, graph.registry, graph.edges, openapi).id;
+      if (graph) call.node = attachExternalNode(call, graph.registry, graph.edges, openapi, subsumedEdge(site)).id;
       out.push(call);
     }
   }

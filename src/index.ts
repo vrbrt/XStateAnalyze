@@ -7,3 +7,7 @@ export { markdownReport } from './output/markdown.js';
 export { htmlReport } from './output/html.js';
 export { subgraph, callersOf } from './query.js';
 export { discoverWorkspaces } from './project.js';
+export { analyzeJava } from './java/analyze.js';
+export { parseJava } from './java/parse.js';
+export { analyzeWorkspace, analyzeRoot, loadWorkspaceConfig, projectsFromArgs, linkSeams, computeSeams, detectLanguage } from './workspace.js';
+export type { WorkspaceConfig, ProjectConfig } from './workspace.js';

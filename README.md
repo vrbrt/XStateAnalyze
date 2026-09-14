@@ -1,6 +1,6 @@
-# xsa — static analyzer for React / XState / Next.js
+# xsa — static analyzer for React / XState / Next.js and Java / Spring Boot
 
-Builds a **function call graph** (across files, workspace packages and npm packages), extracts **XState machines** into a state tree and Mermaid diagrams, and detects **external calls** (HTTP, gRPC, GraphQL, tRPC, WebSocket, DB, Next.js server actions). Everything lands in JSON, plus a self-contained interactive HTML report built on that JSON.
+Builds a **function call graph** (across files, workspace packages and npm packages; Spring DI-aware for Java), extracts **XState machines** into a state tree and Mermaid diagrams, detects **external calls** (HTTP, gRPC, GraphQL, tRPC, WebSocket, DB, Kafka/RabbitMQ, Next.js server actions), and — across **several projects** — links callers to handlers through their **API definitions** (OpenAPI operations, routes, topics), producing a system view of who calls what. Everything lands in JSON, plus a self-contained interactive HTML report built on that JSON.
 
 Runs on Node ≥ 18 (tested on Node 24) and Bun ≥ 1.4 (`bun src/cli.ts …` — no build step needed).
 
@@ -20,7 +20,24 @@ node dist/cli.js analyze /path/to/monorepo -o ./xsa-out
 #  xsa-out/machines/*.mmd       one Mermaid stateDiagram-v2 per machine
 ```
 
-Try it on the bundled fixture: `npm run analyze:demo` then open `examples/demo-out/report.html`.
+Try it on the bundled fixtures: `npm run analyze:demo` (a React/XState/Next.js monorepo) or `npm run analyze:workspace` (that frontend plus two Spring Boot services linked through their OpenAPI specs and Kafka topics), then open `examples/demo-out/report.html` / `examples/workspace-out/report.html`.
+
+### Several projects at once (frontend + Spring services)
+
+```bash
+# side-by-side repos, described once (see xsa.workspace.schema.json):
+cat xsa.workspace.json
+# { "projects": [
+#     { "name": "web",            "root": "../frontend",        "type": "ts" },
+#     { "name": "users-service",  "root": "../users-service",   "type": "java", "hosts": ["api.example.com/v1"] },
+#     { "name": "orders-service", "root": "../orders-service",  "type": "java" } ],
+#   "openapi": ["../contracts"] }          # optional extra spec folder
+xsa analyze --workspace xsa.workspace.json -o ./xsa-out
+xsa analyze --project web=../frontend --project users=../users-service -o ./xsa-out   # or ad hoc
+xsa seams --workspace xsa.workspace.json --unlinked      # endpoints nobody calls / calls nobody handles
+```
+
+A root containing `xsa.workspace.json` is picked up automatically. Node ids are prefixed with the project name (`users-service::src/main/java/...#UsersController.getUserById`); endpoint / topic nodes are shared, which is what makes the seams.
 
 ### Other commands
 
@@ -54,6 +71,17 @@ Common options: `--ignore-packages react react-dom` (drop noisy edges), `--inclu
 - Action summaries: `assign(user, error)`, `sendTo(notifierRef, NOTIFY)`, `raise(X)`, `spawnChild(notifier)`, inline functions by name.
 - Cross-references: `useMachine`/`useActor`/`useActorRef`/`createActor`/`interpret`/`createActorContext(m)` + `Ctx.useSelector()`, `invoke.src`/`spawnChild` pointing at another machine (through `setup({ actors })` or v4 `services`).
 - Output: `MachineModel` JSON and a Mermaid `stateDiagram-v2` per machine (nested composites, parallel regions, notes for entry/exit/invoke/tags). Diagrams are validated against Mermaid's parser in the test suite.
+
+**Java / Spring Boot** (pure-JS parser — no JDK needed; Maven or Gradle layouts, `src/main/java`, `src/test/java` with `--include-tests`)
+- Classes, interfaces, records, enums; fields, methods, constructors; call chains with light type inference (declared field/param/local types, project method return types, `Optional`/`Mono`/`ResponseEntity` unwrapping, Lombok accessors, lambda parameters over collections).
+- **Spring DI**: beans from `@Component/@Service/@Repository/@Controller/@RestController/@Configuration` and `@Bean` methods (including the concrete class a `@Bean` factory returns). A call through an interface resolves to its implementation bean — `@Primary` wins, `@Qualifier`/`@Resource(name)` select by bean name, `List<X>`/`Map<String,X>` injection fans out to every implementation (`via X (all)`), several candidates without a tie-breaker are kept and labelled `(ambiguous)`.
+- **Configuration**: `application.yml`/`.properties` (+ `bootstrap.*`; profile documents are skipped) resolve `@Value("${…}")`, `@ConfigurationProperties` getters, `Environment.getProperty`, constructor-injected values and string concatenation / `String.format` / `UriComponentsBuilder` chains into concrete URLs and topic names. `spring.application.name`, `server.port` and `server.servlet.context-path` identify the service and prefix its routes.
+- **Entry points**: `@RequestMapping`/`@GetMapping`… handlers (also mappings inherited from an implemented interface), controllers implementing an *absent* generated `XxxApi` (matched by operationId), `@KafkaListener`/`@RabbitListener`/`@JmsListener`/`@SqsListener` (topics resolved from properties, RabbitMQ `@QueueBinding` keys), `@Scheduled`, `@EventListener`, `main`.
+- **Outbound**: `RestTemplate` (`getForObject`… `exchange(HttpMethod)`), `WebClient`/`RestClient` fluent chains (`get().uri(…)`, `uri(b -> b.path(…))`, `@Bean` `baseUrl`), `java.net.http` `HttpRequest`, OkHttp, OpenFeign interfaces, generated OpenAPI clients (`usersApi.getUserById()` — present or not), Spring Data repositories (entity from the generic argument), `JdbcTemplate`/`EntityManager`/Mongo/Redis/Elasticsearch, `KafkaTemplate`, `RabbitTemplate` (exchange/routing key), `JmsTemplate`, `StreamBridge`, SQS/SNS, gRPC stubs.
+
+**Seams (multi-project)**
+- Every endpoint/topic is one shared node; callers in any project attach to it. Handlers are found by operationId (spec-owning project and `servers` hosts preferred), by host → project (`hosts` in the workspace file, `spring.application.name`, `localhost:<server.port>`) plus route template with context path, or by topic/queue name (RabbitMQ binding keys with `*`/`#`).
+- `analysis.seams` lists each seam with `callers`, `handlers` and a status — `linked`, `no-handler` (third-party or missing implementation), `no-caller` (unused endpoint/listener), `ambiguous` (several projects match without a host hint); `analysis.projectEdges` aggregates them per project pair. The HTML report shows them as a **Projects** system diagram (click an edge for its seams) and a filterable **Seams** table; the Markdown report includes a Mermaid project-dependency graph.
 
 **External calls** (rule-driven, see `src/rules.ts`)
 - HTTP: `fetch`, `axios` (+ instances with `baseURL`), `ky`, `got`, `superagent`, `XMLHttpRequest`, `sendBeacon`, `EventSource`.
@@ -95,13 +123,15 @@ console.log(callGraphFlowchart(a, { nodeIds: around }));
 ## Limitations
 
 - Static only: dynamic dispatch (`props.onClick()`, callbacks passed as parameters, `obj[key]()`) is counted in `stats.unresolvedCalls` rather than guessed.
+- Java resolution is name-based (no compiler): calls on receivers whose type cannot be inferred (raw generics, untyped lambda parameters outside collections, reflection, AOP proxies) are unresolved; library return types are only known for common wrappers. Kotlin is not parsed.
+- Spring: bean selection follows `@Primary`/`@Qualifier`/collection rules; `@Profile`/`@Conditional*` beans are not excluded, and `application-<profile>.*` files are listed but not merged.
 - Machine configs must be object literals (or constants / spreads that resolve to them); configs built by arbitrary functions produce a warning.
 - Type-driven resolution is only as good as the types available; run `npm install` in the analyzed repo for best results.
 
 ## Development
 
 ```bash
-npm test              # node --test over examples/demo (40 assertions: graph, Next.js, XState, external calls, OpenAPI)
+npm test              # node --test: 57 assertions over examples/demo (TS) and examples/services + xsa.workspace.json (Java, seams)
 npm run test:render   # opens examples/demo-out/report.html in Edge/Chrome (puppeteer-core) and renders every diagram + the graph
 npm run test:all      # both, regenerating the demo output in between
 npm run dev -- analyze examples/demo -o examples/demo-out

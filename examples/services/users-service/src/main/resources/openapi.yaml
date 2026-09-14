@@ -1,0 +1,30 @@
+openapi: 3.0.3
+info:
+  title: Demo Users API
+  version: 1.2.0
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      tags: [Users]
+      summary: List users
+      responses: { '200': { description: ok } }
+    post:
+      operationId: createUser
+      tags: [Users]
+      responses: { '201': { description: created } }
+  /users/{id}:
+    get:
+      operationId: getUserById
+      tags: [Users]
+      responses: { '200': { description: ok } }
+    delete:
+      operationId: UsersController_deleteUser
+      tags: [Users]
+      responses: { '204': { description: gone } }
+  /orders/{id}/items:
+    get:
+      tags: [Orders]
+      responses: { '200': { description: ok } }

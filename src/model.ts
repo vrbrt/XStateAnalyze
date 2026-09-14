@@ -23,6 +23,11 @@ export type EntryKind =
   | 'next:server-action'
   | 'next:data-fn'  // getServerSideProps / getStaticProps
   | 'openapi:operation' // server handler named after an OpenAPI operationId
+  | 'spring:endpoint'   // @RestController / @Controller handler method
+  | 'spring:listener'   // @KafkaListener / @RabbitListener / @JmsListener / @SqsListener
+  | 'spring:scheduled'  // @Scheduled
+  | 'spring:event'      // @EventListener / @TransactionalEventListener
+  | 'main'              // public static void main
   | 'export';
 
 export interface GraphNode {
@@ -51,6 +56,12 @@ export interface GraphNode {
   params?: string[];
   /** OpenAPI operationId this node implements (entry 'openapi:operation') */
   operationId?: string;
+  /** Project this node belongs to (multi-project analyses) */
+  project?: string;
+  /** Topics / queues a listener consumes (entry 'spring:listener') */
+  topics?: string[];
+  /** Java: fully-qualified class name of the declaring type */
+  className?: string;
   /** For kind 'external': what the node stands for (aggregated over all call sites hitting it) */
   external?: { category: ExternalCategory; protocol: string; method?: string; target?: string; service?: string; calls: number };
 }
@@ -64,7 +75,8 @@ export type EdgeKind =
   | 'server-action'  // client function -> 'use server' function
   | 'defines'        // module/function that evaluates createMachine(...) -> machine
   | 'external'       // function -> external node (HTTP endpoint, DB model, ...)
-  | 'http-route';    // external HTTP node (fetch('/api/x')) -> matching Next.js route handler
+  | 'http-route'     // external HTTP node -> matching route handler (Next.js route, Spring endpoint, OpenAPI handler)
+  | 'message-route'; // external topic/queue node -> listener consuming it
 
 export interface GraphEdge {
   from: string;
@@ -106,6 +118,7 @@ export interface ExternalCall {
   /** id of the enclosing GraphNode */
   caller: string;
   package?: string;
+  project?: string;
   /** Matched rule name */
   rule: string;
   /** GraphNode id (kind 'external') this call is attached to */
@@ -126,6 +139,8 @@ export interface OpenApiOperation {
   summary?: string;
   /** spec file (root-relative) */
   spec: string;
+  /** project owning the spec (multi-project analyses) */
+  project?: string;
   servers: string[];
   /** GraphNode ids of functions calling this operation (filled by the analyzer) */
   callers?: string[];
@@ -135,6 +150,7 @@ export interface OpenApiOperation {
 
 export interface OpenApiSpecInfo {
   file: string;
+  project?: string;
   title?: string;
   version?: string;
   operations: number;
@@ -222,6 +238,8 @@ export interface MachineModel {
 
 export interface FileInfo {
   path: string;
+  project?: string;
+  language?: 'ts' | 'java';
   package?: string;
   boundary?: 'client' | 'server';
   route?: string;
@@ -247,10 +265,65 @@ export interface AnalysisStats {
   durationMs: number;
 }
 
+export interface ProjectInfo {
+  name: string;
+  root: string;
+  language: 'ts' | 'java' | 'mixed';
+  /** spring.application.name (Java) or package name (TS) */
+  serviceName?: string;
+  /** server.servlet.context-path prefix applied to Spring routes */
+  contextPath?: string;
+  port?: string;
+  /** Host names / base URLs that identify this project as the target of a call (config + inferred) */
+  hosts: string[];
+  files: number;
+  /** application property files that were read (Java) */
+  propertyFiles?: string[];
+  warnings?: number;
+}
+
+export type SeamKind = 'http' | 'kafka' | 'rabbit' | 'jms' | 'sqs' | 'grpc' | 'server-action';
+
+export interface SeamParty {
+  project?: string;
+  node: string;
+  line?: number;
+}
+
+/** An API-level connection between projects: one endpoint / operation / topic, with everyone calling and implementing it. */
+export interface Seam {
+  id: string;
+  kind: SeamKind;
+  label: string;
+  method?: string;
+  /** path (http) or topic / queue (messaging) */
+  target?: string;
+  operationId?: string;
+  spec?: string;
+  /** external GraphNode standing for the target, when some caller exists */
+  node?: string;
+  callers: SeamParty[];
+  handlers: SeamParty[];
+  status: 'linked' | 'no-handler' | 'no-caller' | 'ambiguous';
+}
+
+export interface ProjectEdge {
+  from: string; // project name, or '(external)' for unlinked calls
+  to: string;   // project name, or '(unhandled)'
+  kind: SeamKind;
+  seams: string[];
+  count: number;
+}
+
 export interface Analysis {
   version: string;
   generatedAt: string;
   root: string;
+  /** Projects in the analysis (one for a single root) */
+  projects: ProjectInfo[];
+  /** API seams between projects (multi-project) or between callers and handlers (single project) */
+  seams: Seam[];
+  projectEdges: ProjectEdge[];
   packages: WorkspacePackage[];
   files: FileInfo[];
   nodes: GraphNode[];
@@ -264,6 +337,14 @@ export interface Analysis {
 
 export interface AnalyzerOptions {
   root: string;
+  /** Project name (multi-project analyses); defaults to the root's package / directory name */
+  project?: string;
+  /** Force the language instead of auto-detecting from package.json / pom.xml / build.gradle */
+  language?: 'ts' | 'java';
+  /** Host names / base URLs that identify this project as a call target (e.g. `users-service`, `api.example.com/v1`) */
+  hosts?: string[];
+  /** Include src/test/java (Java) */
+  includeTests?: boolean;
   tsconfig?: string;
   include?: string[];
   exclude?: string[];

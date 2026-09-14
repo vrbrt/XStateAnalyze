@@ -19,6 +19,24 @@ export function markdownReport(a: Analysis): string {
     out.push('');
   }
 
+  if (a.projects.length > 1) {
+    out.push('## Projects', '', '| Project | Language | Service | Hosts | Files |', '|---|---|---|---|---|');
+    for (const p of a.projects) out.push(`| ${cell(p.name)} | ${p.language} | ${cell(p.serviceName)}${p.contextPath ? ' ' + cell(p.contextPath) : ''} | ${cell(p.hosts.join(', '))} | ${p.files} |`);
+    out.push('');
+    if (a.projectEdges.length) {
+      out.push('### Project dependencies', '', '```mermaid', 'flowchart LR');
+      const id = (s: string) => 'p_' + s.replace(/[^A-Za-z0-9_]/g, '_');
+      for (const p of a.projects) out.push(`  ${id(p.name)}["${p.name}"]`);
+      for (const e of a.projectEdges) out.push(`  ${id(e.from)} -->|${e.kind} x${e.count}| ${id(e.to)}`);
+      out.push('```', '');
+    }
+  }
+  if (a.seams.length) {
+    out.push('## API seams', '', '| Status | Kind | Seam | Operation | Callers | Handlers |', '|---|---|---|---|---|---|');
+    const party = (p: { project?: string; node: string }) => (a.projects.length > 1 && p.project ? p.project + ':' : '') + nodeName(p.node);
+    for (const s of a.seams) out.push(`| ${s.status} | ${s.kind} | ${cell(s.label)} | ${cell(s.operationId)} | ${s.callers.map((c) => cell(party(c))).join(', ')} | ${s.handlers.map((h) => cell(party(h))).join(', ')} |`);
+    out.push('');
+  }
   const entries = a.nodes.filter((n) => n.entry);
   if (entries.length) {
     out.push('## Entry points (Next.js)', '', '| Kind | Route | Function | File |', '|---|---|---|---|');

@@ -46,15 +46,23 @@ export class OpenApiIndex {
     const m = method.toUpperCase();
     let p = url.replace(/^\{[^}]*\}/, '').replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/[?#].*$/, '');
     if (!p.startsWith('/')) return undefined;
-    const candidates = new Set<string>([p]);
+    const host = url.match(/^[a-z]+:\/\/([^/]+)/i)?.[1]?.toLowerCase();
     for (const op of this.operations) {
+      if (op.method !== m) continue;
+      // candidate paths for this operation: the raw path, and the path with this spec's own server base stripped
+      const candidates = new Set<string>([p]);
+      let hostMatches = !host;
       for (const s of op.servers) {
+        const sh = s.match(/^[a-z]+:\/\/([^/]+)/i)?.[1]?.toLowerCase();
+        if (host && sh === host) hostMatches = true;
         const base = s.replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/\/$/, '');
         if (base && p.startsWith(base + '/')) candidates.add(p.slice(base.length));
       }
-    }
-    for (const op of this.operations) {
-      if (op.method !== m) continue;
+      if (!hostMatches && op.servers.some((s) => /^[a-z]+:\/\//i.test(s))) {
+        // absolute URL to a host this spec does not declare: only accept when the host is not any other spec's host either
+        const knownHosts = new Set(this.operations.flatMap((o) => o.servers).map((s) => s.match(/^[a-z]+:\/\/([^/]+)/i)?.[1]?.toLowerCase()).filter(Boolean));
+        if (knownHosts.has(host!)) continue;
+      }
       const tmpl = op.path.split('/').filter(Boolean);
       for (const c of candidates) {
         const segs = c.split('/').filter(Boolean);

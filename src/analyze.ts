@@ -5,7 +5,7 @@ import { detectExternalCalls } from './analyzers/external.js';
 import { NodeRegistry } from './analyzers/functions.js';
 import { analyzeNextFile, linkNextBoundaries } from './analyzers/next.js';
 import { findMachineUsages, findMachines, linkMachines, type MachineUsage } from './analyzers/xstate.js';
-import type { Analysis, AnalyzerOptions, ExternalRule, FileInfo, MachineModel } from './model.js';
+import type { Analysis, AnalyzerOptions, ExternalRule, FileInfo, MachineModel, ProjectInfo } from './model.js';
 import { loadOpenApi, type OpenApiIndex } from './openapi.js';
 import { loadWorkspace, normalize } from './project.js';
 import { DEFAULT_RULES } from './rules.js';
@@ -25,10 +25,11 @@ export function readRulesFile(file: string): { rules: ExternalRule[]; replace: b
   return { rules: raw.rules ?? [], replace: !!raw.replace };
 }
 
-export function analyze(opts: AnalyzerOptions): Analysis {
+export function analyze(opts: AnalyzerOptions, shared?: { openapi?: OpenApiIndex }): Analysis {
   const t0 = Date.now();
   const log = opts.onProgress ?? (() => {});
   const ws = loadWorkspace(opts);
+  const project = opts.project ?? ws.rootPackageName;
   const registry = new NodeRegistry(ws.root, ws.fileOwner, ws.rootPackageName);
   const edges = new EdgeSet();
   const warnings: string[] = [];
@@ -41,7 +42,7 @@ export function analyze(opts: AnalyzerOptions): Analysis {
   };
   const rules = loadRules(opts);
   const counter = { n: 0 };
-  const openapi = loadOpenApi(ws.root, opts.openapi, (opts.exclude ?? []).map(globToRegExpLoose), warnings);
+  const openapi = shared?.openapi ?? loadOpenApi(ws.root, opts.openapi, (opts.exclude ?? []).map(globToRegExpLoose), warnings);
   if (openapi.size) log(`indexed ${openapi.size} OpenAPI operations from ${openapi.specs.map((s) => s.file).join(', ')}`);
   const files: FileInfo[] = [];
   const machines: MachineModel[] = [];
@@ -72,7 +73,7 @@ export function analyze(opts: AnalyzerOptions): Analysis {
   linkMachines(machines, usages, edges);
   remapDeclarationFiles(registry, edges, warnings);
   tagOpenApiHandlers(registry, openapi, opts.openapiHandlers);
-  linkNextBoundaries(registry.nodes, edges, externalCalls, counter);
+  linkNextBoundaries(registry.nodes, edges, externalCalls, counter, !shared);
   for (const op of openapi.operations) {
     op.callers = [...new Set(externalCalls.filter((c) => c.operationId === op.operationId).map((c) => c.caller))];
     op.handlers = [...registry.nodes.values()].filter((n) => n.entry === 'openapi:operation' && n.operationId === op.operationId && n.route === op.path).map((n) => n.id);
@@ -119,10 +120,20 @@ export function analyze(opts: AnalyzerOptions): Analysis {
     durationMs: Date.now() - t0,
   };
 
+  for (const n of finalNodes) if (n.internal) n.project = project;
+  for (const c of externalCalls) c.project = project;
+  for (const f of files) {
+    f.project = project;
+    f.language = 'ts';
+  }
+  const info: ProjectInfo = { name: project, root: normalize(ws.root), language: 'ts', serviceName: ws.rootPackageName, hosts: opts.hosts ?? [], files: files.length, warnings: warnings.length };
   return {
     version: VERSION,
     generatedAt: new Date().toISOString(),
     root: normalize(ws.root),
+    projects: [info],
+    seams: [],
+    projectEdges: [],
     packages: ws.packages.map((p) => ({ name: p.name, dir: p.dir, files: p.files })),
     files,
     nodes: finalNodes.sort((a, b) => a.id.localeCompare(b.id)),

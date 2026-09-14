@@ -1,4 +1,6 @@
 node_modules
 dist
 examples/demo-out
+examples/workspace-out
 *.log
+scratch

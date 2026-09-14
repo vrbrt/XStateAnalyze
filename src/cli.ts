@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import * as path from 'node:path';
 import { Command } from 'commander';
-import { VERSION, analyze, readRulesFile, writeFile } from './analyze.js';
+import { VERSION, readRulesFile, writeFile } from './analyze.js';
+import { analyzeRoot, analyzeWorkspace, loadWorkspaceConfig, projectsFromArgs } from './workspace.js';
+import * as fs from 'node:fs';
 import type { Analysis, AnalyzerOptions } from './model.js';
 import { callGraphDot } from './output/dot.js';
 import { htmlReport } from './output/html.js';
@@ -22,7 +24,25 @@ function commonOptions(cmd: Command): Command {
     .option('--rules <file>', 'JSON file with extra external-call rules (array, or { rules, replace })')
     .option('--openapi <files...>', 'OpenAPI/Swagger documents to index (default: auto-discovered; pass "none" to disable)')
     .option('--openapi-handlers <globs...>', 'files whose exported functions named after operationIds are server handlers (default: heuristic)')
+    .option('-w, --workspace <file>', 'xsa.workspace.json listing several projects (auto-detected in <root>)')
+    .option('-p, --project <name=path...>', 'analyze several projects side by side (repeatable)')
+    .option('-l, --language <lang>', 'force ts or java for a single root (default: auto-detect)')
+    .option('--hosts <hosts...>', 'host names / base URLs that identify this project as a call target')
+    .option('--include-tests', 'Java: include src/test/java', false)
     .option('-q, --quiet', 'no progress output', false);
+}
+
+/** Single root, workspace file, or --project pairs -> Analysis */
+function run(root: string, o: any): Analysis {
+  const base = toOptions(root, o);
+  if (o.workspace) return analyzeWorkspace(loadWorkspaceConfig(o.workspace), base);
+  if (o.project?.length) return analyzeWorkspace(projectsFromArgs(o.project), base);
+  const auto = path.join(path.resolve(root), 'xsa.workspace.json');
+  if (fs.existsSync(auto)) {
+    console.error(`[xsa] using ${auto}`);
+    return analyzeWorkspace(loadWorkspaceConfig(auto), base);
+  }
+  return analyzeRoot(base);
 }
 
 function toOptions(root: string, o: any): AnalyzerOptions {
@@ -35,6 +55,9 @@ function toOptions(root: string, o: any): AnalyzerOptions {
     ignorePackages: o.ignorePackages,
     openapi: o.openapi ? (o.openapi.length === 1 && o.openapi[0] === 'none' ? [] : o.openapi) : undefined,
     openapiHandlers: o.openapiHandlers,
+    language: o.language,
+    hosts: o.hosts,
+    includeTests: o.includeTests,
     onProgress: o.quiet ? undefined : (m) => console.error(`[xsa] ${m}`),
   };
   if (o.rules) {
@@ -53,7 +76,7 @@ commonOptions(
     .option('-f, --format <formats>', 'comma-separated: json,html,mermaid,dot,md', 'json,html,mermaid,md')
     .option('--max-mermaid-nodes <n>', 'cap nodes in the call-graph flowchart', '300'),
 ).action((root = '.', o) => {
-  const a = analyze(toOptions(root, o));
+  const a = run(root, o);
   const out = path.resolve(o.out);
   const formats = new Set(String(o.format).split(',').map((s) => s.trim()));
   const written: string[] = [];
@@ -65,6 +88,7 @@ commonOptions(
     w('analysis.json', JSON.stringify(a, null, 2));
     w('machines.json', JSON.stringify(a.machines, null, 2));
     w('external-calls.json', JSON.stringify(a.externalCalls, null, 2));
+    w('seams.json', JSON.stringify({ projects: a.projects, seams: a.seams, projectEdges: a.projectEdges }, null, 2));
   }
   if (formats.has('mermaid')) {
     w('callgraph.mmd', callGraphFlowchart(a, { maxNodes: Number(o.maxMermaidNodes) }));
@@ -85,7 +109,7 @@ commonOptions(
     .option('--no-notes', 'omit entry/exit/invoke notes')
     .option('--direction <dir>', 'TB or LR'),
 ).action((root = '.', o) => {
-  const a = analyze(toOptions(root, o));
+  const a = run(root, o);
   if (o.json) {
     console.log(JSON.stringify(a.machines, null, 2));
     return;
@@ -105,7 +129,7 @@ commonOptions(
     .option('--json', 'output JSON', false)
     .option('-c, --category <cats...>', 'filter by category (http grpc graphql trpc websocket db server-action messaging other)'),
 ).action((root = '.', o) => {
-  const a = analyze(toOptions(root, o));
+  const a = run(root, o);
   let calls = a.externalCalls;
   if (o.category) calls = calls.filter((c) => o.category.includes(c.category));
   if (o.json) {
@@ -130,7 +154,7 @@ commonOptions(
     .option('--dot', 'emit Graphviz DOT instead of Mermaid', false)
     .option('--no-group', 'do not group nodes by file'),
 ).action((root = '.', o) => {
-  const a = analyze(toOptions(root, o));
+  const a = run(root, o);
   let ids: Set<string> | undefined;
   if (o.focus) {
     ids = subgraph(a, o.focus, Number(o.depth), o.callersOnly ? 'in' : o.calleesOnly ? 'out' : 'both');
@@ -143,10 +167,38 @@ commonOptions(
   console.log(o.dot ? callGraphDot(a, { nodeIds: ids }) : callGraphFlowchart(a, { nodeIds: ids, groupByFile: o.group, maxNodes: 5000 }));
 });
 
+commonOptions(
+  program
+    .command('seams [root]')
+    .description('List API seams: endpoints / topics with their callers and handlers across projects')
+    .option('--json', 'output JSON', false)
+    .option('--unlinked', 'only seams missing a caller or a handler', false)
+    .option('-k, --kind <kinds...>', 'filter by kind (http kafka rabbit jms sqs grpc server-action)'),
+).action((root = '.', o) => {
+  const a = run(root, o);
+  let seams = a.seams;
+  if (o.kind) seams = seams.filter((s) => o.kind.includes(s.kind));
+  if (o.unlinked) seams = seams.filter((s) => s.status !== 'linked');
+  if (o.json) {
+    console.log(JSON.stringify({ projects: a.projects, seams, projectEdges: a.projectEdges }, null, 2));
+    return;
+  }
+  const name = (id: string) => a.nodes.find((n) => n.id === id)?.name ?? id;
+  const party = (p: { project?: string; node: string }) => (a.projects.length > 1 && p.project ? `${p.project}:` : '') + name(p.node);
+  for (const s of seams) {
+    console.log(`${s.status.padEnd(11)} ${s.kind.padEnd(8)} ${s.label.padEnd(48)} ${(s.callers.map(party).join(', ') || '-').padEnd(60)} -> ${s.handlers.map(party).join(', ') || '-'}`);
+  }
+  if (a.projectEdges.length) {
+    console.log('\nproject edges:');
+    for (const e of a.projectEdges) console.log(`  ${e.from} -> ${e.to}  ${e.kind} ×${e.count}`);
+  }
+  console.error(`[xsa] ${seams.length} seams across ${a.projects.length} project(s)`);
+});
+
 function printSummary(a: Analysis) {
   const s = a.stats;
   console.error(
-    `[xsa] ${s.files} files · ${s.functions} functions · ${s.components} components · ${s.hooks} hooks · ${s.edges} edges · ${s.machines} machines · ${s.externalCalls} external calls · ${s.unresolvedCalls} unresolved · ${s.durationMs}ms`,
+    `[xsa] ${a.projects.length > 1 ? a.projects.length + ' projects · ' : ''}${s.files} files · ${s.functions} functions · ${s.components} components · ${s.hooks} hooks · ${s.edges} edges · ${s.machines} machines · ${s.externalCalls} external calls · ${a.seams.length} seams · ${s.unresolvedCalls} unresolved · ${s.durationMs}ms`,
   );
   for (const w of a.warnings.slice(0, 20)) console.error(`[xsa] warn: ${w}`);
   if (a.warnings.length > 20) console.error(`[xsa] … ${a.warnings.length - 20} more warnings (see analysis.json)`);

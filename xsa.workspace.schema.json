@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "xsa workspace",
+  "description": "Several projects (React/Next.js/TS and Java/Spring Boot) analyzed together, linked through their API definitions.",
+  "type": "object",
+  "required": ["projects"],
+  "properties": {
+    "projects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "root"],
+        "properties": {
+          "name": { "type": "string", "description": "Unique short name; prefixes node ids (name::file#fn)" },
+          "root": { "type": "string", "description": "Path to the project, relative to this file" },
+          "type": { "enum": ["ts", "java", "auto"], "default": "auto" },
+          "hosts": { "type": "array", "items": { "type": "string" }, "description": "Host names / base URLs that identify this project as a call target, e.g. users-service, api.example.com/v1, localhost:8081" },
+          "openapi": { "type": "array", "items": { "type": "string" }, "description": "OpenAPI documents of this project (default: discovered)" },
+          "tsconfig": { "type": "string" },
+          "include": { "type": "array", "items": { "type": "string" } },
+          "exclude": { "type": "array", "items": { "type": "string" } },
+          "includeTests": { "type": "boolean", "description": "Java: include src/test/java" },
+          "openapiHandlers": { "type": "array", "items": { "type": "string" } },
+          "ignorePackages": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "openapi": { "type": "array", "items": { "type": "string" }, "description": "Extra OpenAPI documents or directories shared by all projects (e.g. a contracts repo)" }
+  }
+}

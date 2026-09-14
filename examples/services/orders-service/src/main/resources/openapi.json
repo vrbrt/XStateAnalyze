@@ -1,0 +1,10 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Orders API", "version": "2.0.0" },
+  "servers": [{ "url": "http://orders-service/api" }],
+  "paths": {
+    "/orders": { "get": { "operationId": "listOrdersForUser", "tags": ["Orders"], "responses": { "200": { "description": "ok" } } } },
+    "/orders/{id}": { "get": { "operationId": "getOrder", "tags": ["Orders"], "responses": { "200": { "description": "ok" } } } },
+    "/invoices": { "post": { "operationId": "createInvoice", "tags": ["Billing"], "responses": { "201": { "description": "created" } } } }
+  }
+}

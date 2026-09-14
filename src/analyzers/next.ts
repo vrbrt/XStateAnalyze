@@ -146,7 +146,7 @@ export function analyzeNextFile(sf: SourceFile, fns: { node: GraphNode; fn: Func
  * Post-pass: turn client -> 'use server' calls into `server-action` edges and
  * external calls, and link `fetch('/api/...')` to matching route handlers.
  */
-export function linkNextBoundaries(nodes: Map<string, GraphNode>, edges: EdgeSet, externalCalls: ExternalCall[], counter: { n: number }) {
+export function linkNextBoundaries(nodes: Map<string, GraphNode>, edges: EdgeSet, externalCalls: ExternalCall[], counter: { n: number }, routeLinking = true) {
   // server actions
   for (const e of edges.edges.values()) {
     if (e.kind !== 'calls') continue;
@@ -170,6 +170,7 @@ export function linkNextBoundaries(nodes: Map<string, GraphNode>, edges: EdgeSet
     }
   }
 
+  if (!routeLinking) return; // workspace mode: cross-project linking (workspace.ts) owns endpoint -> handler edges
   // fetch('/api/x') -> route handler
   const routes: { node: GraphNode; re: RegExp; methods: string[] }[] = [];
   const routeRe = (route: string) =>

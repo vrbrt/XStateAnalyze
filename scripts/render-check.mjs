@@ -48,6 +48,10 @@ for (const id of machines) {
   if (result === 'ok') console.log('OK   machine', id);
   else { failed++; console.log('FAIL machine', id, '->', result); }
 }
+const seams = await page.evaluate(() => { window.xsa.showTab('seams'); return document.querySelectorAll('#seamTable tbody tr').length; });
+console.log(`seams table: ${seams} rows`);
+const projects = await page.evaluate(() => { if (window.xsa.data.projects.length < 2) return null; window.xsa.showTab('projects'); const cy = window.xsa.getProjectsCy(); return cy ? { nodes: cy.nodes().length, edges: cy.edges().length } : { nodes: 0, edges: 0 }; });
+if (projects) { console.log(`projects view: ${projects.nodes} nodes / ${projects.edges} edges`); if (!projects.nodes) { failed++; console.log('FAIL projects view rendered nothing'); } }
 const graph = await page.evaluate(() => {
   window.xsa.showTab('graph');
   const cy = window.xsa.getCy();

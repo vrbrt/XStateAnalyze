@@ -1,7 +1,7 @@
 {
   "name": "xstate-analyzer",
   "version": "0.1.0",
-  "description": "Static analyzer for React / XState / Next.js projects: call graphs, XState state-machine diagrams, and external-call (HTTP/gRPC/GraphQL/DB) detection.",
+  "description": "Static analyzer for React / XState / Next.js and Java / Spring Boot projects: call graphs (with Spring DI), XState diagrams, external calls, and multi-project API seams via OpenAPI.",
   "type": "module",
   "bin": {
     "xsa": "./dist/cli.js"
@@ -17,14 +17,16 @@
     "dev": "tsx src/cli.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "analyze:demo": "tsx src/cli.ts analyze examples/demo -o examples/demo-out --format json,html,mermaid,dot,md",
-    "test:render": "node scripts/render-check.mjs examples/demo-out/report.html",
-    "test:all": "npm test && npm run analyze:demo -- -q && npm run test:render"
+    "test:render": "node scripts/render-check.mjs examples/demo-out/report.html && node scripts/render-check.mjs examples/workspace-out/report.html",
+    "test:all": "npm test && npm run analyze:demo -- -q && npm run analyze:workspace -- -q && npm run test:render",
+    "analyze:workspace": "tsx src/cli.ts analyze examples -o examples/workspace-out --format json,html,md"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "commander": "^12.1.0",
+    "java-parser": "^3.0.1",
     "ts-morph": "^24.0.0",
     "yaml": "^2.9.1"
   },
@@ -34,5 +36,16 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": [
+    "static-analysis",
+    "call-graph",
+    "xstate",
+    "nextjs",
+    "react",
+    "spring-boot",
+    "openapi",
+    "kafka",
+    "mermaid"
+  ]
 }
