@@ -103,7 +103,9 @@ Add your own with `--rules`: a JSON array (merged before the defaults) or `{ "re
 `report.html` embeds the analysis JSON (same shape as `analysis.json`) and loads Cytoscape, dagre and Mermaid from CDNs.
 
 - **Call graph**: search, click a node for details (file:line with `vscode://` links, badges for entry/boundary, external calls, in/out edges), *Focus* (neighbourhood with adjustable depth), *Trace callers / callees* (transitive), filters by node kind / edge kind / package, "collapse packages", several layouts. External endpoint nodes are coloured by category (http / db / graphql / …) and show their call sites. Graphs over 400 nodes start empty — search and focus, or click "Show whole graph".
-- `window.xsa` exposes `{ data, showTab, focusNode, selectMachine, getCy }` for scripting the page.
+- **Large graphs** (thousands of nodes): the page renders at most *Max nodes* (default 1500, adjustable) nearest to the focus, picks the layout automatically (dagre up to 400 nodes, breadth-first above — dagre is never run on thousands of nodes), switches to compact node rendering, and hides package/builtin members by default above 1500 nodes. Cytoscape and Mermaid are loaded only when the Graph / Machines tabs are opened, so Overview, Seams and External calls appear immediately.
+- `--offline` inlines cytoscape, dagre and mermaid into `report.html` (they are optional dependencies; if missing, `npm i cytoscape cytoscape-dagre dagre mermaid`) so the report needs no network at all (+~3 MB).
+- The embedded data is `analysis.json` minus `files`, with edges stored as index tuples; `window.xsa.data` has the normal shape again after load. `window.xsa` exposes `{ data, showTab, focusNode, selectMachine, getCy, getProjectsCy, lib }` for scripting the page.
 - **Machines**: rendered state diagram, implementations (linked to their graph nodes), used-by / invokes, events, and a collapsible state tree. "Copy Mermaid" for pasting into docs.
 - **External calls**: sortable, filterable table by category chips and free text, with links to the calling function.
 

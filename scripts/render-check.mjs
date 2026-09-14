@@ -35,7 +35,8 @@ const errors = [];
 page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
 page.on('console', (m) => { if (m.type() === 'error') errors.push('console.error: ' + m.text()); });
 await page.goto('file:///' + path.resolve(file).split(path.sep).join('/'), { waitUntil: 'networkidle0', timeout: 90000 });
-await page.waitForFunction(() => window.xsa && window.mermaid && window.cytoscape, { timeout: 60000 });
+await page.waitForFunction(() => window.xsa, { timeout: 60000 });
+await page.evaluate(() => Promise.all([window.xsa.lib('cytoscape'), window.xsa.lib('mermaid')]));
 
 let failed = 0;
 const machines = await page.evaluate(() => window.xsa.data.machines.map((m) => m.id));
@@ -50,10 +51,10 @@ for (const id of machines) {
 }
 const seams = await page.evaluate(() => { window.xsa.showTab('seams'); return document.querySelectorAll('#seamTable tbody tr').length; });
 console.log(`seams table: ${seams} rows`);
-const projects = await page.evaluate(() => { if (window.xsa.data.projects.length < 2) return null; window.xsa.showTab('projects'); const cy = window.xsa.getProjectsCy(); return cy ? { nodes: cy.nodes().length, edges: cy.edges().length } : { nodes: 0, edges: 0 }; });
+const projects = await page.evaluate(async () => { if (window.xsa.data.projects.length < 2) return null; await window.xsa.showTab('projects'); const cy = window.xsa.getProjectsCy(); return cy ? { nodes: cy.nodes().length, edges: cy.edges().length } : { nodes: 0, edges: 0 }; });
 if (projects) { console.log(`projects view: ${projects.nodes} nodes / ${projects.edges} edges`); if (!projects.nodes) { failed++; console.log('FAIL projects view rendered nothing'); } }
-const graph = await page.evaluate(() => {
-  window.xsa.showTab('graph');
+const graph = await page.evaluate(async () => {
+  await window.xsa.showTab('graph');
   const cy = window.xsa.getCy();
   return { nodes: cy.nodes().length, edges: cy.edges().length, total: window.xsa.data.nodes.length };
 });

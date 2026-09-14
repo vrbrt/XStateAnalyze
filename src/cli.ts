@@ -74,7 +74,8 @@ commonOptions(
     .description('Analyze a project / monorepo and write reports')
     .option('-o, --out <dir>', 'output directory', 'xsa-out')
     .option('-f, --format <formats>', 'comma-separated: json,html,mermaid,dot,md', 'json,html,mermaid,md')
-    .option('--max-mermaid-nodes <n>', 'cap nodes in the call-graph flowchart', '300'),
+    .option('--max-mermaid-nodes <n>', 'cap nodes in the call-graph flowchart', '300')
+    .option('--offline', 'embed cytoscape/dagre/mermaid into report.html (requires them in node_modules) so it works without network', false),
 ).action((root = '.', o) => {
   const a = run(root, o);
   const out = path.resolve(o.out);
@@ -96,7 +97,7 @@ commonOptions(
   }
   if (formats.has('dot')) w('callgraph.dot', callGraphDot(a));
   if (formats.has('md')) w('report.md', markdownReport(a));
-  if (formats.has('html')) w('report.html', htmlReport(a));
+  if (formats.has('html')) w('report.html', htmlReport(a, { embedLibs: o.offline, warn: (m) => console.error(`[xsa] warn: ${m}`) }));
   printSummary(a);
   console.error(`[xsa] wrote ${written.length} files to ${out}`);
 });

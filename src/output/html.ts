@@ -1,4 +1,34 @@
+import { createRequire } from 'node:module';
+import * as fs from 'node:fs';
 import type { Analysis } from '../model.js';
+
+export interface HtmlOptions {
+  /** Inline cytoscape / dagre / mermaid from node_modules so the report works without network access */
+  embedLibs?: boolean;
+  warn?: (msg: string) => void;
+}
+
+const LIB_FILES: [global: string, cdn: string, pkgPath: string][] = [
+  ['cytoscape', 'https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js', 'cytoscape/dist/cytoscape.min.js'],
+  ['dagre', 'https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js', 'dagre/dist/dagre.min.js'],
+  ['cytoscapeDagre', 'https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js', 'cytoscape-dagre/cytoscape-dagre.js'],
+  ['mermaid', 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js', 'mermaid/dist/mermaid.min.js'],
+];
+
+/** Inline `<script>` tags for the libraries found in node_modules; missing ones stay on the CDN. */
+function embeddedLibs(warn?: (m: string) => void): string {
+  const req = createRequire(import.meta.url);
+  const out: string[] = [];
+  for (const [, , pkgPath] of LIB_FILES) {
+    try {
+      const file = req.resolve(pkgPath);
+      out.push(`<script>${fs.readFileSync(file, 'utf8').replace(/<\/script/gi, '<\\/script')}</script>`);
+    } catch {
+      warn?.(`--offline: ${pkgPath} not installed (npm i ${pkgPath.split('/')[0]}); the report will load it from the CDN`);
+    }
+  }
+  return out.join('\n');
+}
 
 /**
  * Self-contained interactive report. The analysis JSON is embedded verbatim
@@ -8,19 +38,23 @@ import type { Analysis } from '../model.js';
  * Libraries are loaded from CDNs (cytoscape, dagre, mermaid); the page works
  * offline for everything except the graph canvas and diagram rendering.
  */
-export function htmlReport(a: Analysis): string {
-  const json = JSON.stringify(a).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
+export function htmlReport(a: Analysis, opts: HtmlOptions = {}): string {
+  // Compact embed: `files` is not used by the page; edges become [from, to, kind, count, line, label] index tuples
+  // (the page restores the normal Analysis shape on load, so window.xsa.data matches analysis.json minus `files`).
+  const index = new Map(a.nodes.map((n, i) => [n.id, i]));
+  const payload = { ...a, files: [], edges: [], edgeTuples: a.edges.map((e) => [index.get(e.from) ?? -1, index.get(e.to) ?? -1, e.kind, e.count, e.line ?? 0, e.label ?? '']) };
+  const json = JSON.stringify(payload).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
   const title = `xsa · ${a.root.split('/').pop() ?? 'report'}`;
+  const libs = opts.embedLibs ? embeddedLibs(opts.warn) : '';
+  const cdn = JSON.stringify(Object.fromEntries(LIB_FILES.map(([g, url]) => [g, url])));
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/dagre/0.8.5/dagre.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+${libs}
+<script>window.__xsaLibs = ${cdn};</script>
 <style>
 ${CSS}
 </style>
@@ -74,6 +108,7 @@ ${CSS}
       <div id="searchResults" class="results"></div>
       <details open><summary>View</summary>
         <div class="row"><label>Layout <select id="layout">
+          <option value="auto">auto (dagre ≤ 400 nodes, breadth-first above)</option>
           <option value="dagre-LR">dagre (left→right)</option>
           <option value="dagre-TB">dagre (top→bottom)</option>
           <option value="cose">cose (force)</option>
@@ -81,6 +116,7 @@ ${CSS}
           <option value="concentric">concentric</option>
         </select></label></div>
         <div class="row"><label>Focus depth <input id="depth" type="range" min="1" max="4" value="2"> <span id="depthVal">2</span></label></div>
+        <div class="row"><label>Max nodes <input id="maxNodes" type="number" min="100" max="20000" step="100" value="1500" style="width:80px"></label> <span class="muted small">nearest to the focus are kept</span></div>
         <div class="row"><label><input type="checkbox" id="collapsePkgs"> Collapse packages into one node</label></div>
         <div class="row"><button id="showAll">Show whole graph</button> <button id="clearFocus" hidden>Clear focus</button></div>
         <div class="row muted small" id="graphHint"></div>
@@ -170,7 +206,22 @@ kbd { font-size:10px; border:1px solid var(--border); border-radius:3px; padding
 `;
 
 const JS = String.raw`
+/* ---------- lazy library loading: the graph / diagram libraries are fetched only when their tab opens ---------- */
+const libState = {};
+function loadScript(src) { return new Promise((res, rej) => { const el = document.createElement('script'); el.src = src; el.onload = res; el.onerror = () => rej(new Error('could not load ' + src)); document.head.appendChild(el); }); }
+function lib(name) {
+  const globalsOf = { cytoscape: ['cytoscape', 'dagre', 'cytoscapeDagre'], mermaid: ['mermaid'] };
+  return (libState[name] ??= (async () => {
+    for (const g of globalsOf[name]) if (!window[g]) await loadScript(window.__xsaLibs[g]);
+  })());
+}
+performance.mark('xsa:start');
 const A = JSON.parse(document.getElementById('data').textContent);
+if (A.edgeTuples) {
+  A.edges = A.edgeTuples.filter((t) => t[0] >= 0 && t[1] >= 0).map((t) => ({ from: A.nodes[t[0]].id, to: A.nodes[t[1]].id, kind: t[2], count: t[3], line: t[4] || undefined, label: t[5] || undefined }));
+  delete A.edgeTuples;
+}
+performance.mark('xsa:parsed');
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -193,18 +244,24 @@ const nodeLink = (id) => { const n = nodeById.get(id); return n ? projTag(n.proj
 const PROJECT_COLORS = ['#2563eb', '#16a34a', '#ea580c', '#7c3aed', '#0891b2', '#db2777', '#ca8a04', '#4f46e5'];
 const projectColor = (name) => PROJECT_COLORS[Math.max(0, A.projects.findIndex((p) => p.name === name)) % PROJECT_COLORS.length];
 
+performance.mark('xsa:indexed');
 /* ---------- tabs ---------- */
 $$('nav button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
-function showTab(name) {
+async function showTab(name) {
   $$('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + name));
-  if (name === 'graph') ensureGraph();
-  if (name === 'projects') ensureProjectsGraph();
-  if (name === 'machines' && A.machines.length && !currentMachine) selectMachine(A.machines[0].id);
+  try {
+    if (name === 'graph') await ensureGraph();
+    if (name === 'projects') await ensureProjectsGraph();
+    if (name === 'machines' && A.machines.length && !currentMachine) await selectMachine(A.machines[0].id);
+  } catch (e) {
+    const target = name === 'graph' ? $('#graphHint') : name === 'projects' ? $('#projectDetails') : $('#machineMain');
+    if (target) target.textContent = 'Could not load the rendering library (offline?). Regenerate the report with --offline to embed it. ' + e.message;
+  }
 }
 document.body.addEventListener('click', (ev) => {
   const a = ev.target.closest('a[data-node]');
-  if (a) { ev.preventDefault(); showTab('graph'); focusNode(a.dataset.node); }
+  if (a) { ev.preventDefault(); showTab('graph').then(() => focusNode(a.dataset.node)); }
   const m = ev.target.closest('a[data-machine]');
   if (m) { ev.preventDefault(); showTab('machines'); selectMachine(m.dataset.machine); }
 });
@@ -241,9 +298,12 @@ $('#tiles').innerHTML = Object.entries(A.stats).filter(([k]) => k !== 'durationM
   }
 }
 
+performance.mark('xsa:overview');
 /* ---------- call graph ---------- */
 let cy = null, currentFocus = null, visibleIds = null;
-const state = { kinds: new Set(Object.keys(KIND_COLORS).filter((k) => k !== 'builtin')), edges: new Set(Object.keys(EDGE_STYLE)), pkgs: null, projects: null, collapse: false };
+const BIG = A.nodes.length > 1500;
+// big graphs: package / builtin members are hidden by default (external endpoint nodes carry the useful information)
+const state = { kinds: new Set(Object.keys(KIND_COLORS).filter((k) => k !== 'builtin' && !(BIG && k === 'package'))), edges: new Set(Object.keys(EDGE_STYLE)), pkgs: null, projects: null, collapse: false, maxNodes: 1500, forced: false };
 function initFilters() {
   const kinds = {};
   for (const n of A.nodes) kinds[n.kind] = (kinds[n.kind] ?? 0) + 1;
@@ -267,8 +327,9 @@ function initFilters() {
   $('#layout').addEventListener('change', () => runLayout());
   $('#depth').addEventListener('input', (e) => { $('#depthVal').textContent = e.target.value; if (currentFocus) focusNode(currentFocus); });
   $('#collapsePkgs').addEventListener('change', (e) => { state.collapse = e.target.checked; render(); });
-  $('#showAll').addEventListener('click', () => { currentFocus = null; visibleIds = null; $('#clearFocus').hidden = true; render(true); });
-  $('#clearFocus').addEventListener('click', () => { currentFocus = null; visibleIds = null; $('#clearFocus').hidden = true; render(true); });
+  $('#maxNodes').addEventListener('change', (e) => { state.maxNodes = Math.max(50, Number(e.target.value) || 1500); render(true); });
+  $('#showAll').addEventListener('click', () => { currentFocus = null; visibleIds = null; state.forced = true; $('#clearFocus').hidden = false; render(true); });
+  $('#clearFocus').addEventListener('click', () => { currentFocus = null; visibleIds = null; state.forced = false; $('#clearFocus').hidden = true; render(true); });
   $('#search').addEventListener('input', onSearch);
 }
 function onSearch() {
@@ -289,24 +350,36 @@ function neighborhood(id, depth) {
   return seen;
 }
 function trace(id, dir) {
-  const seen = new Set([id]); const stack = [id];
-  while (stack.length) { const cur = stack.pop(); for (const e of (dir === 'out' ? outE.get(cur) : inE.get(cur)) ?? []) { const o = dir === 'out' ? e.to : e.from; if (!seen.has(o)) { seen.add(o); stack.push(o); } } }
+  // breadth-first so that a node cap keeps the nearest callers / callees
+  const seen = new Set([id]); let frontier = [id];
+  while (frontier.length && seen.size < state.maxNodes * 4) {
+    const next = [];
+    for (const cur of frontier) for (const e of (dir === 'out' ? outE.get(cur) : inE.get(cur)) ?? []) { const o = dir === 'out' ? e.to : e.from; if (!seen.has(o)) { seen.add(o); next.push(o); } }
+    frontier = next;
+  }
   return seen;
 }
 function focusNode(id) {
   currentFocus = id;
+  state.forced = false;
   visibleIds = neighborhood(id, Number($('#depth').value));
   $('#clearFocus').hidden = false;
   render(true);
   showDetails(id);
 }
-function ensureGraph() {
+async function ensureGraph() {
+  if (cy) return;
+  await lib('cytoscape');
   if (cy) return;
   cytoscape.use(cytoscapeDagre);
   cy = cytoscape({
     container: $('#cy'), wheelSensitivity: 0.2,
+    textureOnViewport: BIG, hideEdgesOnViewport: BIG, pixelRatio: BIG ? 1 : 'auto', motionBlur: false,
     style: [
-      { selector: 'node', style: { label: 'data(label)', 'font-size': 10, 'text-wrap': 'wrap', 'text-max-width': 140, 'text-valign': 'center', 'text-halign': 'center', width: 'label', height: 'label', padding: '8px', shape: 'round-rectangle', 'background-color': 'data(color)', 'background-opacity': 0.15, 'border-width': 1.5, 'border-color': 'data(color)', color: getComputedStyle(document.body).color } },
+      { selector: 'node', style: { label: 'data(label)', 'font-size': 10, 'min-zoomed-font-size': 7, 'text-wrap': 'wrap', 'text-max-width': 140, 'text-valign': 'center', 'text-halign': 'center', width: 'label', height: 'label', padding: '8px', shape: 'round-rectangle', 'background-color': 'data(color)', 'background-opacity': 0.15, 'border-width': 1.5, 'border-color': 'data(color)', color: getComputedStyle(document.body).color } },
+      // large renders: fixed-size nodes with ellipsised labels (label measurement per node is the expensive part)
+      { selector: 'node.compact', style: { width: 150, height: 26, 'text-wrap': 'ellipsis', 'text-max-width': 140, 'font-size': 9, padding: '2px' } },
+      { selector: 'edge.compact', style: { 'curve-style': 'haystack', 'haystack-radius': 0.3, label: '', 'target-arrow-shape': 'none', width: 1 } },
       { selector: 'node[kind="machine"]', style: { shape: 'hexagon', 'background-opacity': 0.3 } },
       { selector: 'node[kind="package"], node[kind="builtin"]', style: { shape: 'barrel', 'background-opacity': 0.1 } },
       { selector: 'node[kind="component"]', style: { shape: 'round-rectangle', 'border-width': 2.5 } },
@@ -323,8 +396,7 @@ function ensureGraph() {
   cy.on('dbltap', 'node', (ev) => { const id = ev.target.data('nid'); if (ev.target.data('kind') !== 'pkg-group') focusNode(id); });
   cy.on('tap', (ev) => { if (ev.target === cy) { cy.elements().removeClass('dim focus'); } });
   initFilters();
-  const big = A.nodes.length > 400;
-  $('#graphHint').textContent = big ? A.nodes.length + ' nodes: search and pick a function to explore its neighbourhood, or "Show whole graph" (slow).' : '';
+  if (BIG) $('#kindFilters input[data-kind=package]') && ($('#kindFilters input[data-kind=package]').checked = false);
   render(true);
 }
 function highlight(id) {
@@ -337,8 +409,15 @@ function highlight(id) {
 function render(relayout) {
   if (!cy) return;
   const big = A.nodes.length > 400 && !visibleIds && !currentFocus;
-  if (big && !render.forced) { cy.elements().remove(); return; }
+  if (big && !state.forced) { cy.elements().remove(); $('#graphHint').textContent = A.nodes.length + ' nodes: search and pick a function to explore its neighbourhood, or "Show whole graph".'; return; }
   let nodes = A.nodes.filter((n) => state.kinds.has(n.kind) && (!state.pkgs || !n.package || state.pkgs.has(n.package)) && (!state.projects || !n.project || state.projects.has(n.project)) && (!visibleIds || visibleIds.has(n.id)));
+  // keep the nodes nearest to the focus (visibleIds is in breadth-first order); entry points first for the whole graph
+  if (visibleIds) { const order = new Map([...visibleIds].map((id, i) => [id, i])); nodes.sort((x, y) => order.get(x.id) - order.get(y.id)); }
+  else nodes.sort((x, y) => Number(!!y.entry) - Number(!!x.entry));
+  const total = nodes.length;
+  if (nodes.length > state.maxNodes) nodes = nodes.slice(0, state.maxNodes);
+  $('#graphHint').textContent = nodes.length < total ? 'showing ' + nodes.length + ' of ' + total + ' nodes (raise "Max nodes" or lower the depth / filters)' : nodes.length > 400 ? nodes.length + ' nodes: compact rendering' : '';
+  const compact = nodes.length > 400;
   const ids = new Set(nodes.map((n) => n.id));
   let edges = A.edges.filter((e) => state.edges.has(e.kind) && ids.has(e.from) && ids.has(e.to));
   const els = [];
@@ -359,16 +438,24 @@ function render(relayout) {
     const [color, style] = EDGE_STYLE[e.kind] ?? EDGE_STYLE.calls;
     els.push({ data: { id: 'e:' + key, from, to, source: from, target: to, kind: e.kind, color, style, label: e.kind === 'calls' ? (e.count > 1 ? e.count + '×' : '') : (e.label ?? e.kind) } });
   }
+  cy.startBatch();
   cy.elements().remove();
   cy.add(els);
+  if (compact) cy.elements().addClass('compact');
+  cy.endBatch();
   runLayout();
   if (currentFocus) highlight(currentFocus);
 }
-render.forced = false;
-$('#showAll').addEventListener('click', () => { render.forced = true; });
 function runLayout() {
-  const v = $('#layout').value;
-  const opts = v.startsWith('dagre') ? { name: 'dagre', rankDir: v.split('-')[1], nodeSep: 20, rankSep: 60, animate: false } : v === 'cose' ? { name: 'cose', animate: false, nodeRepulsion: () => 40000, idealEdgeLength: () => 80 } : { name: v, animate: false, spacingFactor: 1.2 };
+  let v = $('#layout').value;
+  const n = cy.nodes().length;
+  if (v === 'auto') v = n <= 400 ? 'dagre-LR' : n <= state.maxNodes ? 'breadthfirst' : 'grid';
+  if (v.startsWith('dagre') && n > 1200) v = 'breadthfirst'; // dagre is quadratic; never let it run on thousands of nodes
+  const roots = currentFocus ? cy.nodes().filter((x) => x.data('nid') === currentFocus) : cy.nodes().filter((x) => x.data('entry'));
+  const opts = v.startsWith('dagre') ? { name: 'dagre', rankDir: v.split('-')[1], nodeSep: 20, rankSep: 60, animate: false }
+    : v === 'cose' ? { name: 'cose', animate: false, numIter: n > 400 ? 200 : 1000, nodeRepulsion: () => 40000, idealEdgeLength: () => 80 }
+    : v === 'breadthfirst' ? { name: 'breadthfirst', animate: false, directed: false, spacingFactor: 0.9, roots: roots.length ? roots : undefined, avoidOverlap: true, grid: true }
+    : { name: v, animate: false, spacingFactor: 1.2 };
   cy.layout(opts).run();
   cy.fit(undefined, 30);
 }
@@ -376,7 +463,8 @@ function showDetails(id) {
   const n = nodeById.get(id);
   if (!n) return;
   const badges = [n.entry ? '<span class="badge entry">' + esc(n.entry) + (n.route ? ' ' + esc(n.route) : '') + '</span>' : '', n.boundary ? '<span class="badge ' + n.boundary + '">use ' + n.boundary + '</span>' : '', n.exported ? '<span class="badge">exported</span>' : '', n.async ? '<span class="badge">async</span>' : '', ...(n.tags ?? []).map((t) => '<span class="badge">' + esc(t) + '</span>')].join('');
-  const edgeList = (list, dir) => list.length ? '<ul>' + list.map((e) => '<li>' + (e.kind !== 'calls' ? '<span class="muted">' + esc(e.kind) + '</span> ' : '') + nodeLink(dir === 'out' ? e.to : e.from) + (e.count > 1 ? ' <span class="muted">×' + e.count + '</span>' : '') + (e.line ? ' <a class="muted small" href="' + fileHref(dir === 'out' ? n.file : nodeById.get(e.from)?.file, e.line) + '">:' + e.line + '</a>' : '') + '</li>').join('') + '</ul>' : '<div class="muted">none</div>';
+  const LIST_CAP = 100;
+  const edgeList = (list, dir) => list.length ? '<ul>' + list.slice(0, LIST_CAP).map((e) => '<li>' + (e.kind !== 'calls' ? '<span class="muted">' + esc(e.kind) + '</span> ' : '') + nodeLink(dir === 'out' ? e.to : e.from) + (e.count > 1 ? ' <span class="muted">×' + e.count + '</span>' : '') + (e.line ? ' <a class="muted small" href="' + fileHref(dir === 'out' ? n.file : nodeById.get(e.from)?.file, e.line, dir === 'out' ? n.project : nodeById.get(e.from)?.project) + '">:' + e.line + '</a>' : '') + '</li>').join('') + (list.length > LIST_CAP ? '<li class="muted">… ' + (list.length - LIST_CAP) + ' more (use Trace to see them in the graph)</li>' : '') + '</ul>' : '<div class="muted">none</div>';
   const ext = extByCaller.get(id) ?? [];
   const machine = machineById.get(id);
   if (n.kind === 'external') {
@@ -391,7 +479,7 @@ function showDetails(id) {
       '<h4>Outgoing (' + (outE.get(id) ?? []).length + ')</h4>' + edgeList(outE.get(id) ?? [], 'out');
     $$('button[data-act]', $('#details')).forEach((b) => b.addEventListener('click', () => {
       if (b.dataset.act === 'focus') focusNode(id);
-      else { currentFocus = id; visibleIds = trace(id, 'in'); $('#clearFocus').hidden = false; render(true); }
+      else { currentFocus = id; state.forced = false; visibleIds = trace(id, 'in'); $('#clearFocus').hidden = false; render(true); }
     }));
     return;
   }
@@ -405,13 +493,13 @@ function showDetails(id) {
     '<h4>Incoming (' + (inE.get(id) ?? []).length + ')</h4>' + edgeList(inE.get(id) ?? [], 'in');
   $$('button[data-act]', $('#details')).forEach((b) => b.addEventListener('click', () => {
     if (b.dataset.act === 'focus') focusNode(id);
-    else { currentFocus = id; visibleIds = trace(id, b.dataset.act === 'callers' ? 'in' : 'out'); $('#clearFocus').hidden = false; render(true); }
+    else { currentFocus = id; state.forced = false; visibleIds = trace(id, b.dataset.act === 'callers' ? 'in' : 'out'); $('#clearFocus').hidden = false; render(true); }
   }));
 }
 
 /* ---------- machines ---------- */
 let currentMachine = null;
-mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' });
+let mermaidReady = false;
 $('#machineList').innerHTML = A.machines.map((m) => '<div data-id="' + esc(m.id) + '"><b>' + esc(m.name) + '</b><div class="sub">' + esc(m.file) + ' · v' + m.version + '</div></div>').join('');
 $$('#machineList div[data-id]').forEach((d) => d.addEventListener('click', () => selectMachine(d.dataset.id)));
 function stateTree(s) {
@@ -437,6 +525,8 @@ async function selectMachine(id) {
     '</div>';
   $('#copyMmd').addEventListener('click', () => navigator.clipboard.writeText(m.mermaid));
   try {
+    await lib('mermaid');
+    if (!mermaidReady) { mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' }); mermaidReady = true; }
     const { svg } = await mermaid.render('mmd-' + Math.random().toString(36).slice(2), m.mermaid);
     $('#diagram').innerHTML = svg;
   } catch (e) {
@@ -444,6 +534,7 @@ async function selectMachine(id) {
   }
 }
 
+performance.mark('xsa:machines-list');
 /* ---------- seams ---------- */
 const SEAM_KIND_COLORS = { http: '#ea580c', kafka: '#0d9488', rabbit: '#0d9488', jms: '#0d9488', sqs: '#0d9488', grpc: '#c026d3', 'server-action': '#dc2626' };
 const seamState = { q: '', kinds: new Set(A.seams.map((s) => s.kind)), statuses: new Set(['linked', 'no-handler', 'no-caller', 'ambiguous']), sort: 'status', dir: 1 };
@@ -471,10 +562,13 @@ function renderSeams() {
   $('#seamTable tbody').innerHTML = rows.map((s) => '<tr><td><span class="status ' + s.status + '">' + s.status + '</span></td><td><span class="badge" style="background:' + (SEAM_KIND_COLORS[s.kind] ?? '#999') + '22">' + esc(s.kind) + '</span></td><td class="mono">' + (s.node && nodeById.has(s.node) ? '<a data-node="' + esc(s.node) + '">' + esc(s.label) + '</a>' : esc(s.label)) + '</td><td class="mono">' + esc(s.operationId ?? '') + (s.spec ? ' <span class="muted small">' + esc(s.spec) + '</span>' : '') + '</td><td>' + partyList(s.callers) + '</td><td>' + partyList(s.handlers) + '</td></tr>').join('') || '<tr><td colspan="6" class="muted">No matching seams.</td></tr>';
 }
 
+performance.mark('xsa:seams');
 /* ---------- projects (system view) ---------- */
 let cyProjects = null;
-function ensureProjectsGraph() {
+async function ensureProjectsGraph() {
   if (cyProjects || !multi) return;
+  await lib('cytoscape');
+  if (cyProjects) return;
   const els = [];
   const pseudo = new Set();
   for (const p of A.projects) els.push({ data: { id: 'p:' + p.name, label: p.name + '\n' + (p.serviceName && p.serviceName !== p.name ? p.serviceName + '\n' : '') + p.language, color: projectColor(p.name), kind: 'project' } });
@@ -512,7 +606,8 @@ function ensureProjectsGraph() {
 }
 
 /* ---------- scripting hook (also used by scripts/render-check.mjs) ---------- */
-window.xsa = { data: A, showTab, focusNode, selectMachine, getCy: () => cy, getProjectsCy: () => cyProjects };
+window.xsa = { data: A, showTab, focusNode, selectMachine, getCy: () => cy, getProjectsCy: () => cyProjects, lib };
+performance.mark('xsa:ready');
 
 /* ---------- external calls ---------- */
 const extState = { q: '', cats: new Set(), sort: 'category', dir: 1 };
