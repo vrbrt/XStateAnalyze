@@ -1,0 +1,28 @@
+{
+  "replace": false,
+  "rules": [
+    {
+      "name": "internal-http-client",
+      "category": "http",
+      "protocol": "@acme/http",
+      "packages": ["@acme/http"],
+      "callee": "\\.(get|post|put|patch|delete)$",
+      "extract": "axios-style"
+    },
+    {
+      "name": "custom-rpc-client",
+      "category": "grpc",
+      "protocol": "acme-rpc",
+      "receiverType": "RpcClient$",
+      "extract": "rpc"
+    },
+    {
+      "name": "analytics",
+      "category": "other",
+      "protocol": "segment",
+      "packages": ["@segment/analytics-next", "analytics-node"],
+      "callee": "\\.(track|identify|page)$",
+      "extract": "rpc"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "demo-monorepo",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "dependencies": {
+    "@xstate/react": "^5.0.0",
+    "axios": "^1.7.0",
+    "react": "^19.0.0",
+    "xstate": "^5.19.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}

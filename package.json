@@ -1,0 +1,38 @@
+{
+  "name": "xstate-analyzer",
+  "version": "0.1.0",
+  "description": "Static analyzer for React / XState / Next.js projects: call graphs, XState state-machine diagrams, and external-call (HTTP/gRPC/GraphQL/DB) detection.",
+  "type": "module",
+  "bin": {
+    "xsa": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "analyze:demo": "tsx src/cli.ts analyze examples/demo -o examples/demo-out --format json,html,mermaid,dot,md",
+    "test:render": "node scripts/render-check.mjs examples/demo-out/report.html",
+    "test:all": "npm test && npm run analyze:demo -- -q && npm run test:render"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "ts-morph": "^24.0.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "puppeteer-core": "^25.11.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "license": "MIT"
+}
